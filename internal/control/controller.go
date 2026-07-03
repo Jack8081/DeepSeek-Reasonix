@@ -133,6 +133,10 @@ type Controller struct {
 	goals        goalMachine
 	autoResearch *autoresearch.Store
 
+	// loop owns the active /loop timer and its background goroutine behind its
+	// own mutex, off c.mu. See loop.go.
+	loop loopMachine
+
 	// workspaceRoot is the workspace root: the base for resolving @-refs and slash
 	// path refs, the working directory for user "!" shell commands and custom
 	// command discovery, and the guard root for checkpoint restore writes. It is
@@ -895,6 +899,9 @@ func (c *Controller) submitCommandOrTurn(trimmed, input, display string, scopedR
 			return
 		case "/prometheus":
 			c.applyPrometheus(trimmed, display)
+			return
+		case "/loop":
+			c.applyLoopCommand(trimmed)
 			return
 		}
 		if c.managementNotice(trimmed) {
@@ -3485,6 +3492,8 @@ const (
 )
 
 func (c *Controller) close(fireSessionEnd bool, jobsMode closeJobsMode) {
+	c.loop.stopLoop() // ensure the loop goroutine doesn't outlive us
+
 	c.mu.Lock()
 	started := c.startedOnce
 	c.mu.Unlock()
@@ -4301,4 +4310,51 @@ func hasSourceFiles(dir string) bool {
 		}
 	}
 	return false
+}
+
+// ── /loop command ─────────────────────────────────────────────────────────────
+
+// LoopInfo returns a read-only snapshot of the current loop state.
+func (c *Controller) LoopInfo() LoopInfo { return c.loop.info() }
+
+// LoopRunning reports whether a loop is currently active.
+func (c *Controller) LoopRunning() bool { return c.loop.Running() }
+
+// StopLoop stops a running loop. It is a no-op on an inactive loop.
+func (c *Controller) StopLoop() bool { return c.loop.stopLoop() }
+
+// StartLoop begins a new loop with the given interval and prompt.
+func (c *Controller) StartLoop(interval time.Duration, prompt string, submit func(string, string)) {
+	c.loop.startLoop(interval, prompt, submit, c.Running)
+}
+
+// applyLoopCommand handles "/loop" input on the Submit path (desktop, HTTP).
+func (c *Controller) applyLoopCommand(trimmed string) {
+	action, intervalStr, prompt, interval, err := ParseLoopArgs(trimmed)
+	if err != nil {
+		c.notice("loop: " + err.Error())
+		return
+	}
+
+	switch action {
+	case "stop":
+		if c.loop.stopLoop() {
+			c.notice("loop stopped")
+		} else {
+			c.notice("no loop running")
+		}
+	case "status":
+		info := c.loop.info()
+		if !info.Running {
+			c.notice("no loop running")
+			return
+		}
+		c.notice(fmt.Sprintf("loop running — %d ticks, every %s, next run at %s\n  prompt: %s",
+			info.Ticks, info.Interval, info.NextRun, info.Prompt))
+	case "start":
+		c.loop.startLoop(interval, prompt, func(turnInput, display string) {
+			c.SubmitDisplay(display, turnInput)
+		}, c.Running)
+		c.notice(fmt.Sprintf("loop started — every %s: %s", intervalStr, prompt))
+	}
 }

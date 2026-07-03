@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"time"
 
 	"reasonix/internal/agent"
 	"reasonix/internal/autoresearch"
@@ -202,6 +203,14 @@ type Settings interface {
 	SetDisplayRecorder(fn func(content, display string))
 }
 
+// LoopControl covers the /loop timer command.
+type LoopControl interface {
+	LoopInfo() LoopInfo
+	LoopRunning() bool
+	StartLoop(interval time.Duration, prompt string, submit func(string, string))
+	StopLoop() bool
+}
+
 // SessionAPI is the full driving port — the composition of every sub-port. A
 // rich frontend (the HTTP server, the desktop app, the TUI) depends on this;
 // leaner frontends (bot, acp) depend on just the sub-ports they use.
@@ -217,6 +226,7 @@ type SessionAPI interface {
 	SessionPersistence
 	Input
 	Settings
+	LoopControl
 }
 
 // Compile-time proof that the concrete controller satisfies each sub-port and

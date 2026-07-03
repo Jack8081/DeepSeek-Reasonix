@@ -3576,6 +3576,9 @@ func (m *chatTUI) runSlashCommand(input string) tea.Cmd {
 		}))
 	case "/goal":
 		return m.runGoalSubcommand(input)
+	case "/loop":
+		m.echoLocalCommand(input)
+		m.runLoopCommand(input)
 	case "/remember":
 		note := strings.TrimSpace(strings.TrimPrefix(input, cmd))
 		if note == "" {
@@ -3635,6 +3638,37 @@ func (m *chatTUI) runGoalSubcommand(input string) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// runLoopCommand handles "/loop" input from the TUI.
+func (m *chatTUI) runLoopCommand(input string) {
+	action, intervalStr, prompt, interval, err := control.ParseLoopArgs(input)
+	if err != nil {
+		m.notice("loop: " + err.Error())
+		return
+	}
+
+	switch action {
+	case "stop":
+		if m.ctrl.StopLoop() {
+			m.notice("loop stopped")
+		} else {
+			m.notice("no loop running")
+		}
+	case "status":
+		info := m.ctrl.LoopInfo()
+		if !info.Running {
+			m.notice("no loop running")
+			return
+		}
+		m.notice(fmt.Sprintf("loop running — %d ticks, every %s, next run at %s\n  prompt: %s",
+			info.Ticks, info.Interval, info.NextRun, info.Prompt))
+	case "start":
+		m.ctrl.StartLoop(interval, prompt, func(turnInput, display string) {
+			m.ctrl.SubmitDisplay(display, turnInput)
+		})
+		m.notice(fmt.Sprintf("loop started — every %s: %s", intervalStr, prompt))
+	}
 }
 
 // runCopyCommand copies the Nth-latest assistant message from the current turn
