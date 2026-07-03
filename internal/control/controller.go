@@ -4332,9 +4332,19 @@ func (c *Controller) LoopRunning() bool { return c.loop.Running() }
 // StopLoop stops a running loop. It is a no-op on an inactive loop.
 func (c *Controller) StopLoop() bool { return c.loop.stopLoop() }
 
-// StartLoop begins a new loop with the given interval and prompt.
+// StartLoop begins a new loop with the given interval and prompt. An interval
+// of 0 starts a self-paced loop: iterations run back to back and the loop
+// stops itself when the agent's reply ends with [loop:done] or
+// [loop:blocked: reason].
 func (c *Controller) StartLoop(interval time.Duration, prompt string, submit func(string, string)) {
-	c.loop.startLoop(interval, prompt, submit, c.Running)
+	c.loop.startLoop(loopConfig{
+		interval:  interval,
+		prompt:    prompt,
+		submit:    submit,
+		isRunning: c.Running,
+		lastText:  func() string { return lastAssistantText(c.History()) },
+		notify:    c.notice,
+	})
 }
 
 // applyLoopCommand handles "/loop" input on the Submit path (desktop, HTTP).
@@ -4353,22 +4363,16 @@ func (c *Controller) ApplyLoopCommand(trimmed string) {
 			c.notice("no loop running")
 		}
 	case "status":
-		info := c.loop.info()
-		if !info.Running {
-			c.notice("no loop running")
-			return
-		}
-		c.notice(fmt.Sprintf("loop running — %d ticks, every %s, next run at %s\n  prompt: %s",
-			info.Ticks, info.Interval, info.NextRun, info.Prompt))
+		c.notice(LoopStatusNotice(c.loop.info()))
 	case "start":
-		c.loop.startLoop(interval, prompt, func(turnInput, display string) {
-			// Use the synchronous Run path so each loop iteration is a self-
-			// contained turn within the same session, without triggering
-			// save-conflict recovery that SubmitDisplay (async + frontend
-			// commit path) can cause when the loop fires while the UI is
-			// still processing the previous turn's events.
+		// Use the synchronous Run path so each loop iteration is a self-
+		// contained turn within the same session, without triggering
+		// save-conflict recovery that SubmitDisplay (async + frontend
+		// commit path) can cause when the loop fires while the UI is
+		// still processing the previous turn's events.
+		c.StartLoop(interval, prompt, func(turnInput, display string) {
 			_ = c.Run(context.Background(), turnInput)
-		}, c.Running)
-		c.notice(fmt.Sprintf("loop started — every %s: %s", intervalStr, prompt))
+		})
+		c.notice(LoopStartNotice(intervalStr, prompt))
 	}
 }

@@ -189,6 +189,7 @@ var Chinese = Messages{
 	CmdMemory:           "查看记忆文件",
 	CmdMigrate:          "重试旧数据迁移",
 	CmdGoal:             "设置或清除当前目标",
+	CmdLoop:             "循环执行任务直到完成（/loop <任务>、/loop 5m <任务>、/loop stop）",
 	CmdRemember:         "保存一条记忆",
 	CmdForget:           "归档一条已存记忆",
 	CmdMcp:              "MCP 服务器",

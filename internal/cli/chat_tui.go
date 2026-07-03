@@ -3656,18 +3656,12 @@ func (m *chatTUI) runLoopCommand(input string) {
 			m.notice("no loop running")
 		}
 	case "status":
-		info := m.ctrl.LoopInfo()
-		if !info.Running {
-			m.notice("no loop running")
-			return
-		}
-		m.notice(fmt.Sprintf("loop running — %d ticks, every %s, next run at %s\n  prompt: %s",
-			info.Ticks, info.Interval, info.NextRun, info.Prompt))
+		m.notice(control.LoopStatusNotice(m.ctrl.LoopInfo()))
 	case "start":
 		m.ctrl.StartLoop(interval, prompt, func(turnInput, display string) {
 			m.ctrl.SubmitDisplay(display, turnInput)
 		})
-		m.notice(fmt.Sprintf("loop started — every %s: %s", intervalStr, prompt))
+		m.notice(control.LoopStartNotice(intervalStr, prompt))
 	}
 }
 

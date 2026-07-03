@@ -1,6 +1,7 @@
 package control
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,10 +21,12 @@ func TestParseLoopArgs(t *testing.T) {
 		{"/loop 5m run tests", "start", "5m", "run tests", false},
 		{"/loop 30s check logs", "start", "30s", "check logs", false},
 		{"/loop 1h do the thing", "start", "1h", "do the thing", false},
+		// No leading duration → self-paced loop; the rest is the prompt.
+		{"/loop fix all failing tests", "start", "", "fix all failing tests", false},
+		{"/loop garbage", "start", "", "garbage", false},
 		{"/loop 5s too fast", "", "", "", true},
 		{"/loop 48h too long", "", "", "", true},
 		{"/loop 5m", "", "", "", true},
-		{"/loop garbage", "", "", "", true},
 	}
 
 	for _, tt := range tests {
@@ -52,6 +55,31 @@ func TestParseLoopArgs(t *testing.T) {
 			if interval != expected {
 				t.Errorf("ParseLoopArgs(%q) interval = %v, want %v", tt.input, interval, expected)
 			}
+		} else if action == "start" && interval != 0 {
+			t.Errorf("ParseLoopArgs(%q) interval = %v, want 0 (self-paced)", tt.input, interval)
+		}
+	}
+}
+
+func TestParseLoopDoneMarker(t *testing.T) {
+	tests := []struct {
+		text       string
+		wantDone   bool
+		wantReason string
+	}{
+		{"all finished\n\n[loop:done]", true, ""},
+		{"all finished\n[LOOP:DONE]\n\n", true, ""},
+		{"stuck\n[loop:blocked: need API credentials]", true, "need API credentials"},
+		{"more to do\n[loop:continue]", false, ""},
+		{"no marker at all", false, ""},
+		{"[loop:done] mentioned mid-text\nbut final line is prose", false, ""},
+		{"", false, ""},
+	}
+	for _, tt := range tests {
+		done, reason := parseLoopDoneMarker(tt.text)
+		if done != tt.wantDone || reason != tt.wantReason {
+			t.Errorf("parseLoopDoneMarker(%q) = (%v, %q), want (%v, %q)",
+				tt.text, done, reason, tt.wantDone, tt.wantReason)
 		}
 	}
 }
@@ -73,11 +101,16 @@ func TestLoopMachineStartStop(t *testing.T) {
 
 	var mu sync.Mutex
 	var submitted []string
-	l.startLoop(100*time.Millisecond, "test prompt", func(input, display string) {
-		mu.Lock()
-		submitted = append(submitted, display)
-		mu.Unlock()
-	}, notRunning)
+	l.startLoop(loopConfig{
+		interval: 100 * time.Millisecond,
+		prompt:   "test prompt",
+		submit: func(input, display string) {
+			mu.Lock()
+			submitted = append(submitted, display)
+			mu.Unlock()
+		},
+		isRunning: notRunning,
+	})
 
 	if !l.Running() {
 		t.Fatal("expected loop to be running after start")
@@ -89,6 +122,9 @@ func TestLoopMachineStartStop(t *testing.T) {
 	}
 	if info.Prompt != "test prompt" {
 		t.Errorf("info.Prompt = %q, want %q", info.Prompt, "test prompt")
+	}
+	if info.SelfPaced {
+		t.Error("interval loop should not report SelfPaced")
 	}
 
 	// Wait for up to 3 ticks.
@@ -125,18 +161,28 @@ func TestLoopMachineStartStop(t *testing.T) {
 func TestLoopMachineStartReplacesPrevious(t *testing.T) {
 	var l loopMachine
 
-	l.startLoop(10*time.Second, "old prompt", func(_, _ string) {}, notRunning)
+	l.startLoop(loopConfig{
+		interval:  10 * time.Second,
+		prompt:    "old prompt",
+		submit:    func(_, _ string) {},
+		isRunning: notRunning,
+	})
 	if !l.Running() {
 		t.Fatal("expected running after first start")
 	}
 
 	var mu sync.Mutex
 	var newSubmitted []string
-	l.startLoop(50*time.Millisecond, "new prompt", func(_, display string) {
-		mu.Lock()
-		newSubmitted = append(newSubmitted, display)
-		mu.Unlock()
-	}, notRunning)
+	l.startLoop(loopConfig{
+		interval: 50 * time.Millisecond,
+		prompt:   "new prompt",
+		submit: func(_, display string) {
+			mu.Lock()
+			newSubmitted = append(newSubmitted, display)
+			mu.Unlock()
+		},
+		isRunning: notRunning,
+	})
 
 	if !l.Running() {
 		t.Fatal("expected running after second start")
@@ -154,6 +200,114 @@ func TestLoopMachineStartReplacesPrevious(t *testing.T) {
 	defer mu.Unlock()
 	if len(newSubmitted) < 2 {
 		t.Errorf("expected at least 2 submissions for new loop, got %d", len(newSubmitted))
+	}
+}
+
+// TestLoopMachineSelfPacedStopsOnDone runs a self-paced loop whose stubbed
+// agent reports [loop:done] on the third iteration, and verifies the loop
+// stops itself with a completion notice.
+func TestLoopMachineSelfPacedStopsOnDone(t *testing.T) {
+	var l loopMachine
+
+	var mu sync.Mutex
+	var inputs []string
+	var reply string
+	var notices []string
+
+	l.startLoop(loopConfig{
+		interval: 0, // self-paced
+		prompt:   "build the feature",
+		submit: func(input, _ string) {
+			mu.Lock()
+			inputs = append(inputs, input)
+			if len(inputs) < 3 {
+				reply = "made progress\n[loop:continue]"
+			} else {
+				reply = "all done\n[loop:done]"
+			}
+			mu.Unlock()
+		},
+		isRunning: notRunning,
+		lastText: func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return reply
+		},
+		notify: func(msg string) {
+			mu.Lock()
+			notices = append(notices, msg)
+			mu.Unlock()
+		},
+	})
+
+	info := l.info()
+	if !info.SelfPaced {
+		t.Error("expected SelfPaced in info for interval 0")
+	}
+
+	// Iterations 1 and 2 continue; each ends with a continuousLoopDelay wait,
+	// so give the third (final) iteration ample time.
+	deadline := time.Now().Add(3 * continuousLoopDelay)
+	for l.Running() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if l.Running() {
+		t.Fatal("expected self-paced loop to stop itself after [loop:done]")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(inputs) != 3 {
+		t.Fatalf("expected exactly 3 iterations, got %d", len(inputs))
+	}
+	for i, in := range inputs {
+		if !strings.Contains(in, "build the feature") {
+			t.Errorf("iteration %d input missing task prompt: %q", i+1, in)
+		}
+		if !strings.Contains(in, "[loop:done]") {
+			t.Errorf("iteration %d input missing marker instructions: %q", i+1, in)
+		}
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "complete") {
+		t.Errorf("expected one completion notice, got %v", notices)
+	}
+}
+
+// TestLoopMachineSelfPacedStopsOnBlocked verifies [loop:blocked: reason]
+// stops the loop and surfaces the reason.
+func TestLoopMachineSelfPacedStopsOnBlocked(t *testing.T) {
+	var l loopMachine
+
+	var mu sync.Mutex
+	var notices []string
+
+	l.startLoop(loopConfig{
+		interval:  0,
+		prompt:    "deploy it",
+		submit:    func(_, _ string) {},
+		isRunning: notRunning,
+		lastText:  func() string { return "cannot continue\n[loop:blocked: missing prod token]" },
+		notify: func(msg string) {
+			mu.Lock()
+			notices = append(notices, msg)
+			mu.Unlock()
+		},
+	})
+
+	deadline := time.Now().Add(2 * continuousLoopDelay)
+	for l.Running() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if l.Running() {
+		t.Fatal("expected loop to stop after [loop:blocked]")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notices) != 1 || !strings.Contains(notices[0], "missing prod token") {
+		t.Errorf("expected blocked notice with reason, got %v", notices)
 	}
 }
 

@@ -177,6 +177,7 @@ type Messages struct {
 	CmdMemory           string // /memory
 	CmdMigrate          string // /migrate
 	CmdGoal             string // /goal
+	CmdLoop             string // /loop
 	CmdRemember         string // /remember
 	CmdForget           string // /forget
 	CmdMcp              string // /mcp

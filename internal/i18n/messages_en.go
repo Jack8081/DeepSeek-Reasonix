@@ -188,6 +188,7 @@ var English = Messages{
 	CmdMemory:           "show memory files",
 	CmdMigrate:          "retry legacy data migration",
 	CmdGoal:             "set or clear the active goal",
+	CmdLoop:             "run a prompt on repeat until done (/loop <prompt>, /loop 5m <prompt>, /loop stop)",
 	CmdRemember:         "save a memory note",
 	CmdForget:           "archive a saved memory",
 	CmdMcp:              "MCP servers",

@@ -381,6 +381,7 @@ var ChineseTraditional = Messages{
 	CmdClear:                   "丟棄當前上下文",
 	CmdRename:                  "重新命名會話",
 	CmdGoal:                    "設定或清除當前目標",
+	CmdLoop:                    "迴圈執行任務直到完成（/loop <任務>、/loop 5m <任務>、/loop stop）",
 	CmdDiffFold:                "切換 diff 摺疊/展開",
 	ListMemorySaved:            "儲存的記憶",
 	ListMemoryArchived:         "歸檔的記憶",
