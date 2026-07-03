@@ -25,9 +25,6 @@ type loopMachine struct {
 
 	stopCh chan struct{}
 	doneCh chan struct{}
-
-	submit    func(string, string)
-	isRunning func() bool // Controller.Running()
 }
 
 type LoopInfo struct {
@@ -43,7 +40,10 @@ type LoopInfo struct {
 func (l *loopMachine) startLoop(interval time.Duration, prompt string, submit func(string, string), isRunning func() bool) {
 	l.mu.Lock()
 	if l.running {
-		l.stopLocked()
+		// Signal the previous goroutine and move on. It exits at its next
+		// stopCh check; we must not wait for it here — it may be blocked on
+		// l.mu itself, or inside a synchronous submit for an entire turn.
+		close(l.stopCh)
 	}
 	now := time.Now()
 	l.prompt = prompt
@@ -53,8 +53,6 @@ func (l *loopMachine) startLoop(interval time.Duration, prompt string, submit fu
 	l.started = now
 	l.lastRan = time.Time{}
 	l.nextRun = now // fire immediately
-	l.submit = submit
-	l.isRunning = isRunning
 	l.stopCh = make(chan struct{})
 	l.doneCh = make(chan struct{})
 	stopCh := l.stopCh
@@ -63,13 +61,10 @@ func (l *loopMachine) startLoop(interval time.Duration, prompt string, submit fu
 
 	go func() {
 		defer close(doneCh)
+		next := now // fire immediately
+		tick := 0
 		for {
-			// Wait for the interval before submitting.
-			l.mu.Lock()
-			delay := time.Until(l.nextRun)
-			l.mu.Unlock()
-
-			if delay > 0 {
+			if delay := time.Until(next); delay > 0 {
 				timer := time.NewTimer(delay)
 				select {
 				case <-stopCh:
@@ -79,65 +74,78 @@ func (l *loopMachine) startLoop(interval time.Duration, prompt string, submit fu
 				}
 			}
 
-			select {
-			case <-stopCh:
+			// If a turn is already in flight (user-initiated, or a still-
+			// running iteration of a replaced loop), wait it out rather than
+			// colliding with it. Poll every 500ms so we don't busy-wait.
+			if !l.waitTurnIdle(stopCh, isRunning) {
 				return
-			default:
 			}
 
-			l.mu.Lock()
-			tickNum := l.ticks + 1
-			l.nextRun = time.Now().Add(interval)
-			submitFn := l.submit
-			isRunningFn := l.isRunning
-			p := l.prompt
-			l.mu.Unlock()
+			tick++
+			l.publish(stopCh, func() {
+				l.nextRun = time.Now().Add(interval)
+			})
+			submit(prompt, fmt.Sprintf("[loop #%d] %s", tick, prompt))
 
-			display := fmt.Sprintf("[loop #%d] %s", tickNum, p)
-			submitFn(p, display)
-
-			// Wait for the turn to finish before starting the interval countdown.
-			// Poll every 500ms so we don't busy-wait.
-			for {
-				select {
-				case <-stopCh:
-					return
-				default:
-				}
-				if !isRunningFn() {
-					break
-				}
-				timer := time.NewTimer(500 * time.Millisecond)
-				select {
-				case <-stopCh:
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
+			// Wait for the turn to finish before starting the interval
+			// countdown (covers async submit implementations).
+			if !l.waitTurnIdle(stopCh, isRunning) {
+				return
 			}
 
-			l.mu.Lock()
-			l.ticks = tickNum
-			l.lastRan = time.Now()
-			// nextRun was set after submit; interval starts AFTER turn completes
-			l.nextRun = time.Now().Add(interval)
-			l.mu.Unlock()
+			next = time.Now().Add(interval)
+			l.publish(stopCh, func() {
+				l.ticks = tick
+				l.lastRan = time.Now()
+				l.nextRun = next
+			})
 		}
 	}()
+}
+
+// waitTurnIdle polls isRunning until the current turn finishes. It returns
+// false if the loop was stopped while waiting.
+func (l *loopMachine) waitTurnIdle(stopCh chan struct{}, isRunning func() bool) bool {
+	for {
+		select {
+		case <-stopCh:
+			return false
+		default:
+		}
+		if !isRunning() {
+			return true
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-stopCh:
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
+// publish applies a status update only if the calling goroutine still owns
+// the loop (identified by its stopCh) — a replaced goroutine must not clobber
+// the state of the loop that superseded it.
+func (l *loopMachine) publish(stopCh chan struct{}, update func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopCh == stopCh && l.running {
+		update()
+	}
 }
 
 func (l *loopMachine) stopLoop() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.stopLocked()
-}
-
-func (l *loopMachine) stopLocked() bool {
 	if !l.running {
 		return false
 	}
+	// Signal only; don't wait for doneCh. The goroutine may be blocked on
+	// l.mu (deadlock) or inside a synchronous submit for the rest of the
+	// current turn (which we let finish). Either way it submits nothing new.
 	close(l.stopCh)
-	<-l.doneCh
 	l.running = false
 	return true
 }

@@ -3501,7 +3501,7 @@ const (
 )
 
 func (c *Controller) close(fireSessionEnd bool, jobsMode closeJobsMode) {
-	c.loop.stopLoop() // ensure the loop goroutine doesn't outlive us
+	c.loop.stopLoop() // signal the loop goroutine so it submits no further turns
 
 	c.mu.Lock()
 	started := c.startedOnce
