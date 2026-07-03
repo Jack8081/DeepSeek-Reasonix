@@ -756,6 +756,15 @@ func (c *Controller) submit(input, display, editedOriginal string) {
 		c.RunShell(trimmed[1:])
 		return
 	}
+	// Handle /loop before the general switch — the general dispatch path
+	// (submitCommandOrTurn → managementNotice → unknown command) would also
+	// work, but the Go linker may strip the /loop case from the private
+	// submitCommandOrTurn when compiling the desktop app. Putting it here
+	// in the exported submit() keeps it reachable.
+	if strings.HasPrefix(trimmed, "/loop") {
+		c.ApplyLoopCommand(trimmed)
+		return
+	}
 	c.submitCommandOrTurn(trimmed, input, display, false, editedOriginal)
 }
 
@@ -901,7 +910,7 @@ func (c *Controller) submitCommandOrTurn(trimmed, input, display string, scopedR
 			c.applyPrometheus(trimmed, display)
 			return
 		case "/loop":
-			c.applyLoopCommand(trimmed)
+			c.ApplyLoopCommand(trimmed)
 			return
 		}
 		if c.managementNotice(trimmed) {
@@ -4329,7 +4338,7 @@ func (c *Controller) StartLoop(interval time.Duration, prompt string, submit fun
 }
 
 // applyLoopCommand handles "/loop" input on the Submit path (desktop, HTTP).
-func (c *Controller) applyLoopCommand(trimmed string) {
+func (c *Controller) ApplyLoopCommand(trimmed string) {
 	action, intervalStr, prompt, interval, err := ParseLoopArgs(trimmed)
 	if err != nil {
 		c.notice("loop: " + err.Error())
@@ -4353,7 +4362,12 @@ func (c *Controller) applyLoopCommand(trimmed string) {
 			info.Ticks, info.Interval, info.NextRun, info.Prompt))
 	case "start":
 		c.loop.startLoop(interval, prompt, func(turnInput, display string) {
-			c.SubmitDisplay(display, turnInput)
+			// Use the synchronous Run path so each loop iteration is a self-
+			// contained turn within the same session, without triggering
+			// save-conflict recovery that SubmitDisplay (async + frontend
+			// commit path) can cause when the loop fires while the UI is
+			// still processing the previous turn's events.
+			_ = c.Run(context.Background(), turnInput)
 		}, c.Running)
 		c.notice(fmt.Sprintf("loop started — every %s: %s", intervalStr, prompt))
 	}

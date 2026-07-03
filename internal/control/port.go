@@ -209,6 +209,7 @@ type LoopControl interface {
 	LoopRunning() bool
 	StartLoop(interval time.Duration, prompt string, submit func(string, string))
 	StopLoop() bool
+	ApplyLoopCommand(trimmed string)
 }
 
 // SessionAPI is the full driving port — the composition of every sub-port. A
