@@ -516,6 +516,116 @@ func TestResetOfficialProviderPricingOnUpgradeRunsOnce(t *testing.T) {
 	}
 }
 
+func TestApplyUserConfigUpgradesOnStartupVersion3NonWindowsNoop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	setRuntimeGOOS(t, "darwin")
+
+	c := &Config{
+		ConfigVersion: 3,
+		Providers: []ProviderEntry{{
+			Name:    "deepseek",
+			Kind:    "openai",
+			BaseURL: "https://api.deepseek.com",
+			Models:  []string{"deepseek-v4-flash"},
+			Prices: map[string]*provider.Pricing{
+				"deepseek-v4-flash": {CacheHit: 4, Input: 4, Output: 4, Currency: "$"},
+			},
+		}},
+	}
+	if err := c.SaveTo(path); err != nil {
+		t.Fatalf("SaveTo: %v", err)
+	}
+
+	changed, err := ApplyUserConfigUpgradesOnStartup(path)
+	if err != nil {
+		t.Fatalf("ApplyUserConfigUpgradesOnStartup: %v", err)
+	}
+	if changed {
+		t.Fatal("v3 non-Windows config should not be rewritten by the Windows bash sandbox migration")
+	}
+	var got Config
+	if _, err := toml.DecodeFile(path, &got); err != nil {
+		t.Fatalf("decode migrated config: %v", err)
+	}
+	if got.ConfigVersion != 3 {
+		t.Fatalf("config_version = %d, want 3", got.ConfigVersion)
+	}
+	deepseek, _ := got.Provider("deepseek")
+	if p := deepseek.Prices["deepseek-v4-flash"]; p == nil || p.Output != 4 || p.Currency != "$" {
+		t.Fatalf("custom flash price = %+v, want preserved", p)
+	}
+}
+
+func TestApplyUserConfigUpgradesOnStartupWindowsBashEnforceDefaultsOffOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	setRuntimeGOOS(t, "windows")
+
+	c := Default()
+	c.ConfigVersion = 3
+	c.Sandbox.Bash = "enforce"
+	if err := c.SaveTo(path); err != nil {
+		t.Fatalf("SaveTo: %v", err)
+	}
+
+	changed, err := ApplyUserConfigUpgradesOnStartup(path)
+	if err != nil {
+		t.Fatalf("ApplyUserConfigUpgradesOnStartup: %v", err)
+	}
+	if !changed {
+		t.Fatal("upgrade should migrate Windows bash sandbox default")
+	}
+	got := LoadForEdit(path)
+	if got.ConfigVersion != Default().ConfigVersion {
+		t.Fatalf("config_version = %d, want %d", got.ConfigVersion, Default().ConfigVersion)
+	}
+	if got.Sandbox.Bash != "off" || got.BashMode() != "off" {
+		t.Fatalf("Windows bash mode after migration = raw %q effective %q, want off/off", got.Sandbox.Bash, got.BashMode())
+	}
+
+	got.Sandbox.Bash = "enforce"
+	if err := got.SaveTo(path); err != nil {
+		t.Fatalf("SaveTo manual enforce: %v", err)
+	}
+	changed, err = ApplyUserConfigUpgradesOnStartup(path)
+	if err != nil {
+		t.Fatalf("second ApplyUserConfigUpgradesOnStartup: %v", err)
+	}
+	if changed {
+		t.Fatal("v4 config should not be migrated again after user re-enables enforce")
+	}
+	got = LoadForEdit(path)
+	if got.Sandbox.Bash != "enforce" || got.BashMode() != "enforce" {
+		t.Fatalf("manual Windows enforce = raw %q effective %q, want enforce/enforce", got.Sandbox.Bash, got.BashMode())
+	}
+}
+
+func TestApplyUserConfigUpgradesOnStartupWindowsBashOffOnlyMarksVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	setRuntimeGOOS(t, "windows")
+
+	c := Default()
+	c.ConfigVersion = 3
+	c.Sandbox.Bash = "off"
+	if err := c.SaveTo(path); err != nil {
+		t.Fatalf("SaveTo: %v", err)
+	}
+
+	changed, err := ApplyUserConfigUpgradesOnStartup(path)
+	if err != nil {
+		t.Fatalf("ApplyUserConfigUpgradesOnStartup: %v", err)
+	}
+	if !changed {
+		t.Fatal("Windows v3 config should be marked as migrated")
+	}
+	got := LoadForEdit(path)
+	if got.ConfigVersion != Default().ConfigVersion {
+		t.Fatalf("config_version = %d, want %d", got.ConfigVersion, Default().ConfigVersion)
+	}
+	if got.Sandbox.Bash != "off" || got.BashMode() != "off" {
+		t.Fatalf("Windows bash mode after marker migration = raw %q effective %q, want off/off", got.Sandbox.Bash, got.BashMode())
+	}
+}
+
 func TestResolveModelUsesPerModelPricing(t *testing.T) {
 	c := &Config{Providers: []ProviderEntry{{
 		Name:    "deepseek",

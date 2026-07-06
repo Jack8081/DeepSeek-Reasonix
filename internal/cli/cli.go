@@ -165,6 +165,9 @@ func migrateLegacyConfigForCLI() {
 	if _, err := config.MigrateLegacyIfNeeded(); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: config migration failed:", err)
 	}
+	if _, err := config.ApplyUserConfigUpgradesOnStartup(config.UserConfigPath()); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: config upgrade failed:", err)
+	}
 }
 
 func migrateMCPConfigForCLIWorkspace() {
