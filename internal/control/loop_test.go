@@ -1,7 +1,6 @@
 package control
 
 import (
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -57,29 +56,6 @@ func TestParseLoopArgs(t *testing.T) {
 			}
 		} else if action == "start" && interval != 0 {
 			t.Errorf("ParseLoopArgs(%q) interval = %v, want 0 (self-paced)", tt.input, interval)
-		}
-	}
-}
-
-func TestParseLoopDoneMarker(t *testing.T) {
-	tests := []struct {
-		text       string
-		wantDone   bool
-		wantReason string
-	}{
-		{"all finished\n\n[loop:done]", true, ""},
-		{"all finished\n[LOOP:DONE]\n\n", true, ""},
-		{"stuck\n[loop:blocked: need API credentials]", true, "need API credentials"},
-		{"more to do\n[loop:continue]", false, ""},
-		{"no marker at all", false, ""},
-		{"[loop:done] mentioned mid-text\nbut final line is prose", false, ""},
-		{"", false, ""},
-	}
-	for _, tt := range tests {
-		done, reason := parseLoopDoneMarker(tt.text)
-		if done != tt.wantDone || reason != tt.wantReason {
-			t.Errorf("parseLoopDoneMarker(%q) = (%v, %q), want (%v, %q)",
-				tt.text, done, reason, tt.wantDone, tt.wantReason)
 		}
 	}
 }
@@ -203,16 +179,15 @@ func TestLoopMachineStartReplacesPrevious(t *testing.T) {
 	}
 }
 
-// TestLoopMachineSelfPacedStopsOnDone runs a self-paced loop whose stubbed
-// agent reports [loop:done] on the third iteration, and verifies the loop
-// stops itself with a completion notice.
-func TestLoopMachineSelfPacedStopsOnDone(t *testing.T) {
+// TestLoopMachineSelfPacedRunsContinuously verifies that a self-paced loop
+// keeps running forever and only stops via stopLoop(). The loop no longer
+// self-terminates on loop markers — it must be manually stopped.
+func TestLoopMachineSelfPacedRunsContinuously(t *testing.T) {
 	var l loopMachine
 
 	var mu sync.Mutex
 	var inputs []string
-	var reply string
-	var notices []string
+	ticks := 0
 
 	l.startLoop(loopConfig{
 		interval: 0, // self-paced
@@ -220,24 +195,10 @@ func TestLoopMachineSelfPacedStopsOnDone(t *testing.T) {
 		submit: func(input, _ string) {
 			mu.Lock()
 			inputs = append(inputs, input)
-			if len(inputs) < 3 {
-				reply = "made progress\n[loop:continue]"
-			} else {
-				reply = "all done\n[loop:done]"
-			}
+			ticks++
 			mu.Unlock()
 		},
 		isRunning: notRunning,
-		lastText: func() string {
-			mu.Lock()
-			defer mu.Unlock()
-			return reply
-		},
-		notify: func(msg string) {
-			mu.Lock()
-			notices = append(notices, msg)
-			mu.Unlock()
-		},
 	})
 
 	info := l.info()
@@ -245,69 +206,93 @@ func TestLoopMachineSelfPacedStopsOnDone(t *testing.T) {
 		t.Error("expected SelfPaced in info for interval 0")
 	}
 
-	// Iterations 1 and 2 continue; each ends with a continuousLoopDelay wait,
-	// so give the third (final) iteration ample time.
-	deadline := time.Now().Add(3 * continuousLoopDelay)
-	for l.Running() && time.Now().Before(deadline) {
+	// Wait for at least 3 iterations.
+	deadline := time.Now().Add(4 * continuousLoopDelay)
+	for {
+		mu.Lock()
+		n := ticks
+		mu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if l.Running() {
-		t.Fatal("expected self-paced loop to stop itself after [loop:done]")
+	if !l.Running() {
+		t.Fatal("expected self-paced loop to stay running — it should not self-stop")
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
-	if len(inputs) != 3 {
-		t.Fatalf("expected exactly 3 iterations, got %d", len(inputs))
+	n := ticks
+	mu.Unlock()
+	if n < 3 {
+		t.Fatalf("expected at least 3 iterations, got %d", n)
 	}
+
+	// Inputs should be the raw prompt (not wrapped with marker instructions).
 	for i, in := range inputs {
-		if !strings.Contains(in, "build the feature") {
-			t.Errorf("iteration %d input missing task prompt: %q", i+1, in)
-		}
-		if !strings.Contains(in, "[loop:done]") {
-			t.Errorf("iteration %d input missing marker instructions: %q", i+1, in)
+		if in != "build the feature" {
+			t.Errorf("iteration %d input = %q, want raw prompt %q", i+1, in, "build the feature")
 		}
 	}
-	if len(notices) != 1 || !strings.Contains(notices[0], "complete") {
-		t.Errorf("expected one completion notice, got %v", notices)
+
+	// Now stop it manually.
+	stopped := l.stopLoop()
+	if !stopped {
+		t.Fatal("expected stop to return true")
+	}
+	if l.Running() {
+		t.Fatal("expected loop not running after stop")
 	}
 }
 
-// TestLoopMachineSelfPacedStopsOnBlocked verifies [loop:blocked: reason]
-// stops the loop and surfaces the reason.
-func TestLoopMachineSelfPacedStopsOnBlocked(t *testing.T) {
+// TestLoopMachineSelfPacedIgnoresMarkers verifies that [loop:done] and
+// [loop:blocked:] markers in the conversation do NOT stop the loop. The loop
+// only stops via /loop stop.
+func TestLoopMachineSelfPacedIgnoresMarkers(t *testing.T) {
 	var l loopMachine
 
 	var mu sync.Mutex
-	var notices []string
+	ticks := 0
 
 	l.startLoop(loopConfig{
-		interval:  0,
-		prompt:    "deploy it",
-		submit:    func(_, _ string) {},
-		isRunning: notRunning,
-		lastText:  func() string { return "cannot continue\n[loop:blocked: missing prod token]" },
-		notify: func(msg string) {
+		interval: 0,
+		prompt:   "deploy it",
+		submit: func(_, _ string) {
 			mu.Lock()
-			notices = append(notices, msg)
+			ticks++
 			mu.Unlock()
 		},
+		isRunning: notRunning,
 	})
 
-	deadline := time.Now().Add(2 * continuousLoopDelay)
-	for l.Running() && time.Now().Before(deadline) {
+	// Wait for several iterations — the loop should keep running regardless
+	// of what the model might say in the conversation.
+	deadline := time.Now().Add(4 * continuousLoopDelay)
+	for {
+		mu.Lock()
+		n := ticks
+		mu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	if !l.Running() {
+		t.Fatal("expected loop to keep running — markers should not stop it")
+	}
+
+	// Confirm it stops cleanly.
+	l.stopLoop()
 	if l.Running() {
-		t.Fatal("expected loop to stop after [loop:blocked]")
+		t.Fatal("expected loop not running after stop")
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(notices) != 1 || !strings.Contains(notices[0], "missing prod token") {
-		t.Errorf("expected blocked notice with reason, got %v", notices)
+	if ticks < 3 {
+		t.Fatalf("expected at least 3 iterations, got %d", ticks)
 	}
 }
 

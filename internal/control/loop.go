@@ -16,9 +16,10 @@ const continuousLoopDelay = 2 * time.Second
 //
 //   - interval (interval > 0): each iteration is a full think→act→finish
 //     cycle, then wait the interval, then repeat, until /loop stop.
-//   - self-paced (interval == 0): iterations run back to back; each turn is
-//     asked to end with a status marker, and the loop stops itself when the
-//     agent reports [loop:done] or [loop:blocked: reason].
+//   - self-paced (interval == 0): iterations run back to back continuously;
+//     each turn finishes, a brief pause avoids hot-spinning, then the next
+//     iteration starts. Only /loop stop (or a new /loop start) stops it —
+//     the loop never stops itself.
 type loopMachine struct {
 	mu sync.Mutex
 
@@ -37,12 +38,11 @@ type loopMachine struct {
 
 // loopConfig carries everything a loop run needs from its host controller.
 type loopConfig struct {
-	interval  time.Duration        // 0 = self-paced
-	prompt    string               // the user's task, unwrapped
+	interval  time.Duration // 0 = self-paced
+	prompt    string        // the user's task, unwrapped
 	submit    func(input, display string)
-	isRunning func() bool          // Controller.Running()
-	lastText  func() string        // last assistant text; nil disables marker checks
-	notify    func(string)         // lifecycle notices ("loop finished …"); may be nil
+	isRunning func() bool  // Controller.Running()
+	notify    func(string) // lifecycle notices; may be nil
 }
 
 type LoopInfo struct {
@@ -80,8 +80,8 @@ func (l *loopMachine) startLoop(cfg loopConfig) {
 
 	go func() {
 		defer close(doneCh)
-		// The wait between iterations: the configured interval, or a token
-		// pause in self-paced mode.
+		// The wait between iterations: the configured interval, or a brief
+		// pause in self-paced mode to avoid hot-spinning.
 		delay := cfg.interval
 		if delay <= 0 {
 			delay = continuousLoopDelay
@@ -102,15 +102,12 @@ func (l *loopMachine) startLoop(cfg loopConfig) {
 			// If a turn is already in flight (user-initiated, or a still-
 			// running iteration of a replaced loop), wait it out rather than
 			// colliding with it. Poll every 500ms so we don't busy-wait.
-			if !l.waitTurnIdle(stopCh, cfg.isRunning) {
+			if !waitTurnIdle(stopCh, cfg.isRunning) {
 				return
 			}
 
 			tick++
 			input := cfg.prompt
-			if cfg.interval <= 0 {
-				input = selfPacedLoopTurnInput(cfg.prompt, tick)
-			}
 			estNext := time.Now().Add(delay)
 			l.publish(stopCh, func() {
 				l.nextRun = estNext
@@ -119,26 +116,8 @@ func (l *loopMachine) startLoop(cfg loopConfig) {
 
 			// Wait for the turn to finish before starting the interval
 			// countdown (covers async submit implementations).
-			if !l.waitTurnIdle(stopCh, cfg.isRunning) {
+			if !waitTurnIdle(stopCh, cfg.isRunning) {
 				return
-			}
-
-			if cfg.interval <= 0 && cfg.lastText != nil {
-				if done, reason := parseLoopDoneMarker(cfg.lastText()); done {
-					l.publish(stopCh, func() {
-						l.ticks = tick
-						l.lastRan = time.Now()
-						l.running = false
-					})
-					if cfg.notify != nil {
-						if reason != "" {
-							cfg.notify(fmt.Sprintf("loop stopped after %d iteration(s) — agent is blocked: %s", tick, reason))
-						} else {
-							cfg.notify(fmt.Sprintf("loop finished — agent reported the task complete after %d iteration(s)", tick))
-						}
-					}
-					return
-				}
 			}
 
 			next = time.Now().Add(delay)
@@ -151,51 +130,9 @@ func (l *loopMachine) startLoop(cfg loopConfig) {
 	}()
 }
 
-// selfPacedLoopTurnInput wraps the user's task for one iteration of a
-// self-paced loop, instructing the agent to report status with a trailing
-// marker (same convention as the [goal:*] markers in goal.go).
-func selfPacedLoopTurnInput(prompt string, tick int) string {
-	return fmt.Sprintf(`[Loop iteration %d] You are running inside an autonomous /loop. The overall task:
-
-%s
-
-Continue from where the previous iteration left off — earlier work is visible in this session. Do the next concrete chunk of work now.
-
-End your reply with exactly one of these markers on its own final line:
-[loop:continue] — more work remains; another iteration will run immediately
-[loop:done] — the task is fully complete and verified; the loop will stop
-[loop:blocked: <reason>] — you cannot make progress without the user; the loop will stop`, tick, prompt)
-}
-
-// parseLoopDoneMarker inspects the final non-empty line of an assistant reply
-// for a loop status marker. It returns done=true when the loop should stop:
-// [loop:done] stops it cleanly, [loop:blocked: reason] stops it with the
-// reason. [loop:continue], a malformed marker, or no marker at all keep the
-// loop running — the safe default is another iteration, which the user can
-// always interrupt with /loop stop.
-func parseLoopDoneMarker(text string) (done bool, reason string) {
-	lines := strings.Split(text, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		lower := strings.ToLower(line)
-		if lower == "[loop:done]" {
-			return true, ""
-		}
-		const blockedPrefix = "[loop:blocked:"
-		if strings.HasPrefix(lower, blockedPrefix) && strings.HasSuffix(line, "]") {
-			return true, strings.TrimSpace(line[len(blockedPrefix) : len(line)-1])
-		}
-		return false, ""
-	}
-	return false, ""
-}
-
 // waitTurnIdle polls isRunning until the current turn finishes. It returns
 // false if the loop was stopped while waiting.
-func (l *loopMachine) waitTurnIdle(stopCh chan struct{}, isRunning func() bool) bool {
+func waitTurnIdle(stopCh chan struct{}, isRunning func() bool) bool {
 	for {
 		select {
 		case <-stopCh:
@@ -271,7 +208,7 @@ func (l *loopMachine) Running() bool {
 // intervalStr is empty for a self-paced loop.
 func LoopStartNotice(intervalStr, prompt string) string {
 	if intervalStr == "" {
-		return fmt.Sprintf("loop started — self-paced, runs until the agent reports [loop:done] (or /loop stop): %s", prompt)
+		return fmt.Sprintf("loop started — self-paced, runs until /loop stop: %s", prompt)
 	}
 	return fmt.Sprintf("loop started — every %s: %s", intervalStr, prompt)
 }
@@ -296,7 +233,7 @@ func LoopStatusNotice(info LoopInfo) string {
 //	/loop stop                → stop
 //	/loop 5m <prompt>         → start, interval 5m (10s–24h)
 //	/loop <prompt>            → start, self-paced (interval 0): iterations run
-//	                            back to back until the agent reports [loop:done]
+//	                            back to back until /loop stop
 func ParseLoopArgs(input string) (action, intervalStr, prompt string, interval time.Duration, err error) {
 	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), "/loop"))
 	if rest == "" {

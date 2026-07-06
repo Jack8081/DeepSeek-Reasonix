@@ -4342,7 +4342,6 @@ func (c *Controller) StartLoop(interval time.Duration, prompt string, submit fun
 		prompt:    prompt,
 		submit:    submit,
 		isRunning: c.Running,
-		lastText:  func() string { return lastAssistantText(c.History()) },
 		notify:    c.notice,
 	})
 }
