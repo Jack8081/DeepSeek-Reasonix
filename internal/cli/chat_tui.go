@@ -3732,7 +3732,7 @@ func (m *chatTUI) runLoopCommand(input string) {
 		m.notice(control.LoopStatusNotice(m.ctrl.LoopInfo()))
 	case "start":
 		m.ctrl.StartLoop(interval, prompt, func(turnInput, display string) {
-			m.ctrl.SubmitDisplay(display, turnInput)
+			_ = m.ctrl.Run(context.Background(), turnInput)
 		})
 		m.notice(control.LoopStartNotice(intervalStr, prompt))
 	}
