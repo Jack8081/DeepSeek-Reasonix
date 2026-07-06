@@ -25,6 +25,10 @@ type Session struct {
 	// part of the usual full rewrite; the flag exists for observability and to
 	// let callers opt out of work that a dirty session would make redundant.
 	normalizedDirty bool
+	// eventLogDamaged is set when LoadSession found the on-disk event log torn
+	// or corrupt and returned the replayable prefix (or the .jsonl checkpoint).
+	// The next save heals the log with a rewrite-and-compact.
+	eventLogDamaged bool
 }
 
 // NewSession initializes a session with an optional system prompt.
@@ -59,6 +63,68 @@ func (s *Session) Replace(msgs []provider.Message) {
 func (s *Session) Snapshot() []provider.Message {
 	msgs, _ := s.snapshotWithVersion()
 	return msgs
+}
+
+// Len returns the number of messages, safe to call from any goroutine.
+func (s *Session) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.Messages)
+}
+
+// CloneWithMessages returns a fresh Session carrying msgs while preserving the
+// persistence baseline of the source session. Resume paths use this when they
+// need to adjust loaded history before a rewrite; dropping persisted would make
+// CAS treat the first legitimate rewrite as a stale-runtime conflict.
+//
+// Callers that are handed history from outside this Session should prefer
+// CloneWithMessagesIfCompatible, so stale carried history cannot borrow a newer
+// on-disk baseline.
+func (s *Session) CloneWithMessages(msgs []provider.Message) *Session {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	version := s.version
+	if !messagesEqualForStorageList(s.Messages, msgs) {
+		version++
+	}
+	return &Session{
+		Messages:        append([]provider.Message(nil), msgs...),
+		version:         version,
+		rewriteVersion:  s.rewriteVersion,
+		persisted:       s.persisted,
+		normalizedDirty: s.normalizedDirty,
+		eventLogDamaged: s.eventLogDamaged,
+	}
+}
+
+// CloneWithMessagesIfCompatible preserves the persistence baseline only when
+// msgs is the same persisted history, optionally with a refreshed leading system
+// prompt. Other history changes must happen after Resume so SaveRewrite can
+// still detect genuine stale-controller conflicts.
+func (s *Session) CloneWithMessagesIfCompatible(msgs []provider.Message) (*Session, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !messagesCompatibleForStorageBaseline(s.Messages, msgs) {
+		return nil, false
+	}
+	version := s.version
+	if !messagesEqualForStorageList(s.Messages, msgs) {
+		version++
+	}
+	return &Session{
+		Messages:        append([]provider.Message(nil), msgs...),
+		version:         version,
+		rewriteVersion:  s.rewriteVersion,
+		persisted:       s.persisted,
+		normalizedDirty: s.normalizedDirty,
+		eventLogDamaged: s.eventLogDamaged,
+	}, true
 }
 
 func (s *Session) snapshotWithVersion() ([]provider.Message, uint64) {

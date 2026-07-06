@@ -8,6 +8,10 @@
 //     knob) instead of reasoning_effort, since M3 has no level scale.
 //   - open.bigmodel.cn / api.z.ai (Zhipu GLM) → emits thinking.type=enabled|
 //     disabled instead of reasoning_effort, which Zhipu silently ignores.
+//   - api.longcat.chat → emits thinking.type=enabled|disabled and omits
+//     reasoning_effort, matching LongCat's OpenAI-compatible API.
+//   - ollama.com → accepts hosted Ollama Cloud's reasoning_effort scale,
+//     including max, and omits the field for none/disabled.
 //   - everything else (MiMo and other OpenAI-compatible gateways) uses the
 //     vanilla reasoning_effort scale (low/medium/high).
 //
@@ -79,6 +83,8 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	deepseek := protocol == "deepseek" || (protocol == "" && IsDeepSeek(cfg.BaseURL))
 	minimax := protocol == "" && IsMiniMax(cfg.BaseURL)
 	zhipu := protocol == "" && IsZhipu(cfg.BaseURL)
+	longcat := protocol == "" && IsLongCat(cfg.BaseURL)
+	ollamaCloud := protocol == "" && IsOllamaCloud(cfg.BaseURL)
 	// Optional explicit `thinking` config field — a vendor-agnostic escape hatch
 	// (credit @eghrhegpe, #5063) for OpenAI-compatible providers we don't
 	// auto-detect (e.g. opencode.ai). "enabled"/"disabled" drive thinking.type;
@@ -131,6 +137,29 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		default:
 			return nil, fmt.Errorf("openai: provider %q uses Zhipu thinking; effort must be enabled or disabled", name)
 		}
+	case longcat:
+		// LongCat exposes a binary thinking knob on its OpenAI-compatible endpoint:
+		// thinking.type=enabled|disabled. It documents reasoning text via
+		// reasoning_content, but not the generic reasoning_effort scale.
+		switch effort {
+		case "", "enabled", "disabled":
+		default:
+			return nil, fmt.Errorf("openai: provider %q uses LongCat thinking; effort must be enabled or disabled", name)
+		}
+	case ollamaCloud:
+		// Hosted Ollama Cloud uses top-level reasoning_effort. "none" and the
+		// legacy/off aliases intentionally omit the field, which lets the model
+		// run without thinking. Local Ollama is not auto-detected because its
+		// model/version support varies.
+		switch effort {
+		case "", "none", "disabled", "off":
+			effort = ""
+		case "xhigh", "max":
+			effort = "max"
+		case "low", "medium", "high":
+		default:
+			return nil, fmt.Errorf("openai: provider %q uses Ollama Cloud thinking; effort must be none, low, medium, high, or max", name)
+		}
 	case effort != "":
 		// Non-DeepSeek backends use OpenAI's reasoning_effort scale (low/medium/
 		// high); "max" is a DeepSeek-ism MiMo et al. reject with 400, so clamp it
@@ -160,6 +189,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		deepseek:     deepseek,
 		minimax:      minimax,
 		zhipu:        zhipu,
+		longcat:      longcat,
 		thinkingType: thinkingType,
 		vision:       vision,
 		visionDetail: visionDetail,
@@ -193,6 +223,7 @@ type client struct {
 	deepseek     bool
 	minimax      bool          // true for api.minimaxi.com — emits MiniMax-M3's thinking knob instead of reasoning_effort
 	zhipu        bool          // true for Zhipu GLM (bigmodel.cn / z.ai) — gates thinking via thinking.type, ignores reasoning_effort
+	longcat      bool          // true for LongCat — gates thinking via thinking.type, ignores reasoning_effort
 	thinkingType string        // explicit `thinking` config override (enabled|disabled); "" = no override
 	vision       bool          // model accepts image input — embed attached images as image_url parts
 	visionDetail string        // image_url detail hint (low|high); "" = auto/omit
@@ -252,6 +283,18 @@ func applyCustomHeaders(h http.Header, headers map[string]string) {
 	for name, value := range cleanCustomHeaders(headers) {
 		h.Set(name, value)
 	}
+}
+
+func applyAPIKeyHeader(h http.Header, baseURL, apiKey string) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return
+	}
+	if IsMiMo(baseURL) {
+		h.Set("api-key", apiKey)
+		return
+	}
+	h.Set("Authorization", "Bearer "+apiKey)
 }
 
 func cleanExtraBody(in map[string]any) map[string]any {
@@ -315,9 +358,7 @@ func (c *client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			return nil, err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		if c.apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-		}
+		applyAPIKeyHeader(httpReq.Header, c.baseURL, c.apiKey)
 		httpReq.Header.Set("Accept", "text/event-stream")
 		applyCustomHeaders(httpReq.Header, c.headers)
 		return httpReq, nil
@@ -470,6 +511,19 @@ func (c *client) buildRequest(req provider.Request) chatRequest {
 		}
 		if c.thinkingType != "" {
 			t = c.thinkingType // explicit `thinking` config overrides the effort knob
+		}
+		out.Thinking = &thinkingMode{Type: t}
+		out.ReasoningEffort = ""
+	case c.longcat:
+		// LongCat's binary thinking knob: "enabled" (default, thinking on) or
+		// "disabled". The API documents reasoning_content in OpenAI responses but
+		// not reasoning_effort, so keep depth out of the request.
+		t := c.effort
+		if t == "" {
+			t = c.thinkingType
+		}
+		if t == "" {
+			t = "enabled"
 		}
 		out.Thinking = &thinkingMode{Type: t}
 		out.ReasoningEffort = ""

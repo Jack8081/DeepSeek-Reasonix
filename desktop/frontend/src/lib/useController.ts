@@ -10,7 +10,7 @@ import { app, onEvent, onReady } from "./bridge";
 import { invalidateCache } from "./composerHistory";
 import { formatGuardianAssessmentNotice } from "./guardianEvents";
 import { createRafBatch } from "./rafBatch";
-import { t } from "./i18n";
+import { t, type DictKey } from "./i18n";
 import { fileDiffFromWire, summarize, summarizeFileDiff, type ToolFileDiff } from "./tools";
 import { modeHasAutoApproveTools, normalizeMode, normalizeToolApprovalMode } from "./types";
 import type {
@@ -394,7 +394,7 @@ export function historyMessagesToItems(messages: HistoryMessage[], idPrefix: str
     }
     if (m.role === "notice") {
       if (m.content.trim() !== "") {
-        items.push({ kind: "notice", id: `${idPrefix}${seq}`, level: m.level === "warn" ? "warn" : "info", text: m.content });
+        items.push({ kind: "notice", id: `${idPrefix}${seq}`, level: m.level === "warn" ? "warn" : "info", text: localizedBackendNoticeText(m.content) });
         seq++;
       }
       continue;
@@ -725,7 +725,7 @@ function applyEvent(s: State, e: WireEvent): State {
       return { ...s, usage, context: { ...s.context, used, sessionTokens }, turnTokens, turnTotalTokens, turnCost, sessionTokens, sessionCost, sessionCurrency };
     }
     case "notice":
-      return { ...s, running: s.turnActive ? s.running : false, seq: s.seq + 1, items: [...s.items, { kind: "notice", id: `n${s.seq}`, level: e.level ?? "info", text: e.text ?? "" }] };
+      return { ...s, running: s.turnActive ? s.running : false, seq: s.seq + 1, items: [...s.items, { kind: "notice", id: `n${s.seq}`, level: e.level ?? "info", text: localizedBackendNoticeText(e.text ?? "") }] };
     case "phase":
       return { ...s, seq: s.seq + 1, items: [...s.items, { kind: "phase", id: `p${s.seq}`, text: e.text ?? "" }] };
     case "compaction_started":
@@ -953,6 +953,118 @@ function errorMessage(err: unknown): string {
   return String(err || "");
 }
 
+export function effortSwitchNoticeText(err: unknown): string {
+  return settingSwitchNoticeText(err, "effort", {
+    busy: "status.effortSwitchBusy",
+    leaseHeld: "status.effortSwitchLeaseHeld",
+    starting: "status.effortSwitchStarting",
+    startupFailed: "status.effortSwitchStartupFailed",
+    retry: "status.effortSwitchRetry",
+    failed: "status.effortSwitchFailed",
+  });
+}
+
+export function modelSwitchNoticeText(err: unknown): string {
+  const msg = errorMessage(err).trim() || "unknown error";
+  const unknownModel = /^unknown model (.+)$/i.exec(msg);
+  if (unknownModel) {
+    return t("status.modelSwitchUnknown", { model: unknownModel[1] });
+  }
+  const unavailable = /^model (.+) is not available because provider (.+) is not added$/i.exec(msg);
+  if (unavailable) {
+    return t("status.modelSwitchProviderUnavailable", { model: unavailable[1], provider: unavailable[2] });
+  }
+  return settingSwitchNoticeText(msg, "model", {
+    busy: "status.modelSwitchBusy",
+    leaseHeld: "status.modelSwitchLeaseHeld",
+    starting: "status.modelSwitchStarting",
+    startupFailed: "status.modelSwitchStartupFailed",
+    retry: "status.modelSwitchRetry",
+    failed: "status.modelSwitchFailed",
+  });
+}
+
+export function tokenModeSwitchNoticeText(err: unknown): string {
+  return settingSwitchNoticeText(err, "token mode", {
+    busy: "status.tokenModeSwitchBusy",
+    leaseHeld: "status.tokenModeSwitchLeaseHeld",
+    starting: "status.tokenModeSwitchStarting",
+    startupFailed: "status.tokenModeSwitchStartupFailed",
+    retry: "status.tokenModeSwitchRetry",
+    failed: "status.tokenModeSwitchFailed",
+  });
+}
+
+export function localizedBackendNoticeText(text: string): string {
+  const msg = text.trim();
+  const autosave = /^Session autosave failed: (.+)$/s.exec(msg);
+  if (autosave) {
+    return t("status.sessionAutosaveFailed", { err: autosave[1] });
+  }
+  const saveBefore = /^Session save failed before (.+?): (.+)$/s.exec(msg);
+  if (saveBefore) {
+    return t("status.sessionSaveFailedBefore", { action: localizedSessionAction(saveBefore[1]), err: saveBefore[2] });
+  }
+  const modelFallback = /^model (.+) is no longer available; switched to (.+)$/s.exec(msg);
+  if (modelFallback) {
+    return t("status.modelFallbackSwitched", { model: modelFallback[1], fallback: modelFallback[2] });
+  }
+  return msg;
+}
+
+function localizedSessionAction(action: string): string {
+  switch (action.trim()) {
+    case "changing model":
+      return t("status.actionChangingModel");
+    case "changing effort":
+      return t("status.actionChangingEffort");
+    case "changing token mode":
+      return t("status.actionChangingTokenMode");
+    case "rebuilding settings":
+      return t("status.actionRebuildingSettings");
+    case "switching sessions":
+      return t("status.actionSwitchingSessions");
+    case "switching tabs":
+      return t("status.actionSwitchingTabs");
+    case "autosave":
+      return t("status.actionAutosave");
+    default:
+      return action.trim() || t("status.actionCurrentSession");
+  }
+}
+
+function settingSwitchNoticeText(
+  err: unknown,
+  setting: "effort" | "model" | "token mode",
+  keys: {
+    busy: DictKey;
+    leaseHeld: DictKey;
+    starting: DictKey;
+    startupFailed: DictKey;
+    retry: DictKey;
+    failed: DictKey;
+  },
+): string {
+  const msg = errorMessage(err).trim() || "unknown error";
+  const lower = msg.toLowerCase();
+  if (lower.includes("finish or cancel") && lower.includes(`before changing ${setting}`)) {
+    return t(keys.busy);
+  }
+  if (lower.includes("already open in another reasonix window") || lower.includes("session lease held")) {
+    return t(keys.leaseHeld);
+  }
+  if (lower.includes("workspace is still starting")) {
+    return t(keys.starting);
+  }
+  if (lower.startsWith("workspace failed to start")) {
+    return t(keys.startupFailed, { err: msg });
+  }
+  if (lower.includes(`changed while switching ${setting}`) || (lower.includes("tab ") && lower.includes("not found"))) {
+    return t(keys.retry);
+  }
+  return t(keys.failed, { err: msg });
+}
+
 async function refreshMetaForTab(tabId: string, dispatchTo: (tabId: string, action: Action) => void): Promise<void> {
   try {
     dispatchTo(tabId, { type: "meta", meta: await app.MetaForTab(tabId) });
@@ -1073,23 +1185,31 @@ export function useController() {
       if (reset && sessionLoadCurrent(tabId, seq)) dispatchTo(tabId, { type: "reset" });
 
       const stillCurrent = () => sessionLoadCurrent(tabId, seq);
+      const requiresVisibleTab = reason === "startup" || reason === "switch-tab" || reason === "open-topic";
+      const stillVisible = () => !requiresVisibleTab || activeTabIdRef.current === tabId;
       const noteFailure = (label: string, err: unknown) => {
         addBreadcrumb("tab.hydrate", `${label} failed ${tabId}: ${errorMessage(err)}`);
       };
 
-      const historyStartedAt = Date.now();
+      const loadTimed = async <T,>(label: string, load: () => Promise<T>): Promise<T | undefined> => {
+        const startedAt = Date.now();
+        addBreadcrumb("tab.hydrate", `${label} start ${reason} ${tabId}`);
+        try {
+          const value = await load();
+          addBreadcrumb("tab.hydrate", `${label} done ${reason} ${tabId} ms=${Date.now() - startedAt}`);
+          return value;
+        } catch (err) {
+          noteFailure(label, err);
+          return undefined;
+        }
+      };
 
-      // Phase 1: dispatch fast metadata immediately so the transcript can render
-      // without waiting for slower ancillary calls (e.g. BalanceForTab network).
-      const [meta, historyPage] = await Promise.all([
-        app.MetaForTab(tabId).catch((err) => { noteFailure("meta", err); return undefined; }),
-        skipHistory
-          ? Promise.resolve(undefined)
-          : app.HistoryPageForTab(tabId, 0, HISTORY_PAGE_TURNS).catch((err) => { noteFailure("history", err); return undefined; }),
-      ]);
+      const historyStartedAt = Date.now();
+      const historyPage = skipHistory
+        ? undefined
+        : await loadTimed("history", () => app.HistoryPageForTab(tabId, 0, HISTORY_PAGE_TURNS));
 
       if (!stillCurrent()) return;
-      if (meta !== undefined) dispatchTo(tabId, { type: "meta", meta });
       if (!skipHistory && historyPage !== undefined) {
         const messages = asArray(historyPage.messages);
         dispatchTo(tabId, { type: "history_page", page: historyPage, mode: "replace" });
@@ -1120,21 +1240,20 @@ export function useController() {
       // in a loading state.
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
       if (!stillCurrent()) return;
-      if (activeTabIdRef.current !== tabId && (reason === "startup" || reason === "switch-tab" || reason === "open-topic")) {
+      if (!stillVisible()) {
         addBreadcrumb("tab.hydrate", `ancillary skipped inactive ${reason} ${tabId}`);
         return;
       }
+      const meta = await loadTimed("meta", () => app.MetaForTab(tabId));
+      if (!stillCurrent()) return;
+      if (!stillVisible()) {
+        addBreadcrumb("tab.hydrate", `meta ignored inactive ${reason} ${tabId}`);
+        return;
+      }
+      if (meta !== undefined) dispatchTo(tabId, { type: "meta", meta });
       const ancillaryStartedAt = Date.now();
       const loadAncillary = async <T,>(label: string, load: () => Promise<T>): Promise<T | undefined> => {
-        const startedAt = Date.now();
-        try {
-          const value = await load();
-          addBreadcrumb("tab.hydrate", `ancillary ${label} ${reason} ${tabId} ms=${Date.now() - startedAt}`);
-          return value;
-        } catch (err) {
-          noteFailure(label, err);
-          return undefined;
-        }
+        return loadTimed(`ancillary ${label}`, load);
       };
       const [effort, jobs, context] = await Promise.all([
         loadAncillary("effort", () => app.EffortForTab(tabId)),
@@ -1142,22 +1261,30 @@ export function useController() {
         loadAncillary("context", () => app.ContextUsageForTab(tabId)),
       ]);
       if (!stillCurrent()) return;
+      if (!stillVisible()) {
+        addBreadcrumb("tab.hydrate", `ancillary ignored inactive ${reason} ${tabId}`);
+        return;
+      }
       if (effort !== undefined) dispatchTo(tabId, { type: "effort", effort });
       if (jobs !== undefined) dispatchTo(tabId, { type: "jobs", jobs: asArray(jobs) });
       if (context !== undefined) dispatchTo(tabId, { type: "context", context });
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
       if (!stillCurrent()) return;
-      if (activeTabIdRef.current !== tabId && (reason === "startup" || reason === "switch-tab" || reason === "open-topic")) {
+      if (!stillVisible()) {
         addBreadcrumb("tab.hydrate", `checkpoints skipped inactive ${reason} ${tabId}`);
         return;
       }
       const checkpoints = await loadAncillary("checkpoints", () => app.CheckpointsForTab(tabId));
       if (!stillCurrent()) return;
+      if (!stillVisible()) {
+        addBreadcrumb("tab.hydrate", `checkpoints ignored inactive ${reason} ${tabId}`);
+        return;
+      }
       if (checkpoints !== undefined) dispatchTo(tabId, { type: "checkpoints", checkpoints: asArray(checkpoints) });
       addBreadcrumb("tab.hydrate", `ancillary ${reason} ${tabId} ms=${Date.now() - ancillaryStartedAt}`);
       app.BalanceForTab(tabId)
         .then((balance) => {
-          if (sessionLoadCurrent(tabId, seq)) dispatchTo(tabId, { type: "balance", balance });
+          if (sessionLoadCurrent(tabId, seq) && stillVisible()) dispatchTo(tabId, { type: "balance", balance });
         })
         .catch((err) => { noteFailure("balance", err); });
     })();
@@ -1412,7 +1539,7 @@ export function useController() {
   }, [activeTabId]);
 
   const sendToTab = useCallback(async (tabId: string, displayText: string, submitText = displayText, originalText?: string) => {
-    if (!tabId) throw new Error("workspace is still starting");
+    if (!tabId) throw new Error(t("composer.workspaceStarting"));
     const seq = getOrCreateState(statesRef.current, tabId).seq;
     const display = displayText.trim();
     const submit = submitText.trim();
@@ -1438,7 +1565,7 @@ export function useController() {
       return sendToTab(tabId, displayText, submitText);
     }
     return activeTabFromBackend().then((active) => {
-      if (!active?.id) throw new Error("workspace is still starting");
+      if (!active?.id) throw new Error(t("composer.workspaceStarting"));
       setActiveTabId(active.id);
       activeTabIdRef.current = active.id;
       confirmBackendActiveTab(active.id);
@@ -1448,7 +1575,7 @@ export function useController() {
   }, [activeTabFromBackend, activeTabId, confirmBackendActiveTab, dispatchRuntimeStatusForTab, sendToTab]);
 
   const runShell = useCallback(async (command: string) => {
-    if (!activeTabId) throw new Error("workspace is still starting");
+    if (!activeTabId) throw new Error(t("composer.workspaceStarting"));
     dispatchTo(activeTabId, { type: "user", text: `!${command}`, seq: getOrCreateState(statesRef.current, activeTabId).seq });
     try {
       await app.RunShellForTab(activeTabId, command);
@@ -1459,7 +1586,7 @@ export function useController() {
   }, [activeTabId, dispatchTo]);
 
   const steer = useCallback(async (text: string) => {
-    if (!activeTabId) throw new Error("workspace is still starting");
+    if (!activeTabId) throw new Error(t("composer.workspaceStarting"));
     // No optimistic user bubble: rewind/fork map turns by counting user items,
     // and a steer is not a backend turn — the Steer event's ↪ notice is the
     // visible confirmation (#3660).
@@ -1697,7 +1824,7 @@ export function useController() {
     try {
       await app.SetModelForTab(activeTabId, name);
     } catch (err) {
-      dispatchTo(activeTabId, { type: "local_notice", level: "warn", text: t("status.modelSwitchFailed", { err: errorMessage(err) }) });
+      dispatchTo(activeTabId, { type: "local_notice", level: "warn", text: modelSwitchNoticeText(err) });
       return;
     }
     try {
@@ -1709,7 +1836,12 @@ export function useController() {
 
   const setEffort = useCallback(async (level: string) => {
     if (!activeTabId) return;
-    await app.SetEffortForTab(activeTabId, level).catch(() => {});
+    try {
+      await app.SetEffortForTab(activeTabId, level);
+    } catch (err) {
+      dispatchTo(activeTabId, { type: "local_notice", level: "warn", text: effortSwitchNoticeText(err) });
+      return;
+    }
     try {
       dispatchTo(activeTabId, { type: "meta", meta: await app.MetaForTab(activeTabId) });
       dispatchTo(activeTabId, { type: "context", context: await app.ContextUsageForTab(activeTabId) });
@@ -1722,7 +1854,7 @@ export function useController() {
     try {
       await app.SetTokenModeForTab(activeTabId, mode);
     } catch (err) {
-      dispatchTo(activeTabId, { type: "local_notice", level: "warn", text: t("status.tokenModeSwitchFailed", { err: errorMessage(err) }) });
+      dispatchTo(activeTabId, { type: "local_notice", level: "warn", text: tokenModeSwitchNoticeText(err) });
       return;
     }
     try {

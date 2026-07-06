@@ -225,6 +225,47 @@ func TestStreamSendsCustomHeaders(t *testing.T) {
 	}
 }
 
+func TestStreamUsesMiMoAPIKeyHeader(t *testing.T) {
+	var gotAuth, gotAPIKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("api-key")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p, err := New(provider.Config{
+		Name:    "mimo",
+		BaseURL: "https://api.xiaomimimo.com/v1",
+		Model:   "mimo-v2.5-pro",
+		APIKey:  "mimo-key",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c := p.(*client)
+	c.chatURL = srv.URL
+
+	ch, err := p.Stream(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for chunk := range ch {
+		if chunk.Type == provider.ChunkError {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+	}
+	if gotAPIKey != "mimo-key" {
+		t.Fatalf("api-key = %q, want mimo-key", gotAPIKey)
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q, want omitted for MiMo", gotAuth)
+	}
+}
+
 func TestStreamSendsExtraBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -832,6 +873,34 @@ func TestBuildRequestNonDeepSeekOmitsThinking(t *testing.T) {
 	}
 	if req.ReasoningEffort != "high" {
 		t.Fatalf("ReasoningEffort = %q, want high", req.ReasoningEffort)
+	}
+}
+
+func TestNewOllamaCloudReasoningEffort(t *testing.T) {
+	p, err := New(provider.Config{Name: "ollama-cloud", BaseURL: "https://ollama.com/v1", Model: "nemotron-3-nano:30b", Extra: map[string]any{"effort": "max"}})
+	if err != nil {
+		t.Fatalf("New max: %v", err)
+	}
+	c := p.(*client)
+	if got := c.buildRequest(provider.Request{}).ReasoningEffort; got != "max" {
+		t.Fatalf("Ollama Cloud reasoning_effort = %q, want max", got)
+	}
+
+	p, err = New(provider.Config{Name: "ollama-cloud", BaseURL: "https://ollama.com/v1", Model: "nemotron-3-nano:30b", Extra: map[string]any{"effort": "none"}})
+	if err != nil {
+		t.Fatalf("New none: %v", err)
+	}
+	c = p.(*client)
+	b, err := json.Marshal(c.buildRequest(provider.Request{}))
+	if err != nil {
+		t.Fatalf("marshal none: %v", err)
+	}
+	if strings.Contains(string(b), "reasoning_effort") {
+		t.Fatalf("Ollama Cloud effort none must omit reasoning_effort: %s", b)
+	}
+
+	if _, err := New(provider.Config{Name: "ollama-cloud", BaseURL: "https://ollama.com/v1", Model: "nemotron-3-nano:30b", Extra: map[string]any{"effort": "ultra"}}); err == nil {
+		t.Fatal("New invalid effort succeeded, want error")
 	}
 }
 

@@ -93,13 +93,12 @@ func appWithTab(t *testing.T, path string) (*App, *WorkspaceTab) {
 // nil sink ctx (no webview) must not disable persistence.
 func TestTurnDonePersistsSession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	_ = path
-	a, tab := appWithTab(t, path)
+	_, tab := appWithTab(t, path)
 
 	tab.sink.Emit(event.Event{Kind: event.TurnDone})
 
 	waitForFile(t, path, "remember this turn")
-	_ = a
+	waitForAutosaveIdle(t, tab)
 }
 
 // TestNonTurnDoneDoesNotPersist confirms only TurnDone triggers a save, so the
@@ -248,8 +247,8 @@ func TestDesktopSnapshotConflictRecoveryUpdatesTabAndProjectTree(t *testing.T) {
 	if tab.SessionPath != recoveryPath {
 		t.Fatalf("tab session path = %q, want recovery path %q", tab.SessionPath, recoveryPath)
 	}
-	if tab.TopicID == "" || tab.TopicID == originalTopic {
-		t.Fatalf("tab topic ID = %q, want fresh recovery topic", tab.TopicID)
+	if tab.TopicID != originalTopic {
+		t.Fatalf("tab topic ID = %q, want original topic %q", tab.TopicID, originalTopic)
 	}
 	meta, ok, err := agent.LoadBranchMeta(recoveryPath)
 	if err != nil || !ok {
@@ -263,22 +262,22 @@ func TestDesktopSnapshotConflictRecoveryUpdatesTabAndProjectTree(t *testing.T) {
 		t.Fatalf("tab recovery meta = %+v, want digest %q parent %q", tabMeta, meta.RecoveryDigest, meta.ParentID)
 	}
 	nodes := app.ListProjectTree()
-	found := false
+	foundOriginal := false
 	var walk func([]ProjectNode)
 	walk = func(list []ProjectNode) {
 		for _, node := range list {
-			if node.TopicID == tab.TopicID {
-				found = true
-				if !node.Recovered || node.RecoveryDigest != meta.RecoveryDigest || node.RecoveryParentID != string(meta.ParentID) {
-					t.Fatalf("project tree recovery node = %+v, want digest %q parent %q", node, meta.RecoveryDigest, meta.ParentID)
-				}
+			if node.Recovered {
+				t.Fatalf("project tree should hide recovery metadata, got node %+v", node)
+			}
+			if node.TopicID == originalTopic {
+				foundOriginal = true
 			}
 			walk(node.Children)
 		}
 	}
 	walk(nodes)
-	if !found {
-		t.Fatalf("project tree did not include recovery topic %q: %#v", tab.TopicID, nodes)
+	if !foundOriginal {
+		t.Fatalf("project tree did not include original topic %q: %#v", originalTopic, nodes)
 	}
 }
 

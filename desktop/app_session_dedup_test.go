@@ -168,6 +168,60 @@ func TestEnsureBlankTabReusesIndexedTopicWithEmptyStub(t *testing.T) {
 	}
 }
 
+func TestEnsureBlankTabStoresCreatedAt(t *testing.T) {
+	isolateDesktopUserDirs(t)
+
+	app := NewApp()
+	before := time.Now().UnixMilli()
+	meta, err := app.EnsureBlankTab("global", "")
+	after := time.Now().UnixMilli()
+	if err != nil {
+		t.Fatalf("EnsureBlankTab: %v", err)
+	}
+
+	createdAt := loadTopicCreatedAt("", meta.TopicID)
+	if createdAt < before || createdAt > after {
+		t.Fatalf("createdAt = %d, want between %d and %d", createdAt, before, after)
+	}
+
+	nodes := app.ListProjectTree()
+	if len(nodes) != 1 || nodes[0].Kind != "global_folder" || len(nodes[0].Children) != 1 {
+		t.Fatalf("project tree = %#v, want Global with one topic", nodes)
+	}
+	if got := nodes[0].Children[0].CreatedAt; got != createdAt {
+		t.Fatalf("project tree createdAt = %d, want %d", got, createdAt)
+	}
+}
+
+func TestEnsureBlankTabRepairsMissingCreatedAtForReusedTopic(t *testing.T) {
+	isolateDesktopUserDirs(t)
+
+	const topicID = "topic_20260704-104018_deadbeef"
+	if err := setTopicTitleWithSource("", topicID, defaultTopicTitle, topicTitleSourceAuto); err != nil {
+		t.Fatalf("set topic title: %v", err)
+	}
+	if err := prependTopicInProjectsFile("", topicID, false); err != nil {
+		t.Fatalf("prepend topic: %v", err)
+	}
+	if got := loadTopicCreatedAt("", topicID); got != 0 {
+		t.Fatalf("createdAt before reuse = %d, want 0", got)
+	}
+
+	app := NewApp()
+	meta, err := app.EnsureBlankTab("global", "")
+	if err != nil {
+		t.Fatalf("EnsureBlankTab: %v", err)
+	}
+	if meta.TopicID != topicID {
+		t.Fatalf("EnsureBlankTab topic = %q, want reused topic %q", meta.TopicID, topicID)
+	}
+
+	expected := time.Date(2026, 7, 4, 10, 40, 18, 0, time.UTC).UnixMilli()
+	if got := loadTopicCreatedAt("", topicID); got != expected {
+		t.Fatalf("repaired createdAt = %d, want %d", got, expected)
+	}
+}
+
 // EnsureBlankTab reuses an already-open project-scoped blank tab.
 
 func TestEnsureBlankTabCreatesOneBlankPerProject(t *testing.T) {
@@ -585,6 +639,41 @@ func TestEnsureBlankTabDoesNotReuseProjectTopicWithSession(t *testing.T) {
 	}
 	if got, _ := app.findTopicSessionForTarget("project", projectRoot, topic.ID); got != existingPath {
 		t.Fatalf("existing topic session changed = %q, want %q", got, existingPath)
+	}
+}
+
+// EnsureBlankTab must not reuse a tombstoned topic: the reused ID would flow
+// into ensureTopicIndexed, whose intentional prepend clears the delete
+// tombstone and resurrects the topic the user removed.
+func TestEnsureBlankTabDoesNotReuseTombstonedTopic(t *testing.T) {
+	isolateDesktopUserDirs(t)
+
+	// Race product on disk: deleted topic whose default title lingered in the
+	// global title map (title-only, absent from GlobalTopics, no sessions).
+	tombstonedID := "topic_tombstone_blank"
+	if err := setTopicTitle("", tombstonedID, defaultTopicTitle); err != nil {
+		t.Fatalf("set lingering title: %v", err)
+	}
+	if err := updateProjectsFile(func(f *desktopProjectFile) (bool, error) {
+		f.DeletedTopics = prependUniqueString(f.DeletedTopics, tombstonedID)
+		return true, nil
+	}); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+
+	meta, err := NewApp().EnsureBlankTab("global", "")
+	if err != nil {
+		t.Fatalf("EnsureBlankTab: %v", err)
+	}
+	if meta.TopicID == tombstonedID {
+		t.Fatalf("EnsureBlankTab reused tombstoned topic %q", meta.TopicID)
+	}
+	f := loadProjectsFile()
+	if !containsDesktopString(f.DeletedTopics, tombstonedID) {
+		t.Fatalf("deletedTopics = %#v, tombstone must survive blank-tab creation", f.DeletedTopics)
+	}
+	if containsDesktopString(f.GlobalTopics, tombstonedID) {
+		t.Fatalf("globalTopics = %#v, tombstoned topic must not be re-indexed", f.GlobalTopics)
 	}
 }
 

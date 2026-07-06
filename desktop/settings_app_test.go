@@ -454,6 +454,35 @@ func TestSaveProviderPersistsThinkingOverride(t *testing.T) {
 	}
 }
 
+func TestSaveProviderPersistsAuthHeader(t *testing.T) {
+	isolateDesktopUserDirs(t)
+
+	app := NewApp()
+	if err := app.SaveProvider(ProviderView{
+		Name:       "minimax-global-anthropic",
+		Kind:       "anthropic",
+		BaseURL:    "https://api.minimax.io/anthropic",
+		Models:     []string{"MiniMax-M3"},
+		APIKeyEnv:  "MINIMAX_API_KEY",
+		AuthHeader: true,
+	}); err != nil {
+		t.Fatalf("SaveProvider: %v", err)
+	}
+
+	cfg := config.LoadForEdit(config.UserConfigPath())
+	got, ok := cfg.Provider("minimax-global-anthropic")
+	if !ok {
+		t.Fatal("saved provider not found")
+	}
+	if !got.AuthHeader {
+		t.Fatal("saved provider auth_header = false, want true")
+	}
+	view := providerViewFromEntry(*got, false, true)
+	if !view.AuthHeader {
+		t.Fatal("provider view authHeader = false, want true")
+	}
+}
+
 func TestSaveProviderPersistsCustomEndpointURLs(t *testing.T) {
 	isolateDesktopUserDirs(t)
 
@@ -1186,5 +1215,136 @@ func TestSaveHooksSettingsForRootUsesDisplayedProjectRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(projectB, ".reasonix", "settings.json")); err == nil {
 		t.Fatal("active project root was written instead of displayed project root")
+	}
+}
+
+// TestLoadDesktopUserConfigForViewDoesNotPersistLegacyProviderAccess locks the
+// read-path contract: loading a legacy-form config (configured providers but
+// no declared desktop.provider_access) through the View helpers returns a
+// normalized in-memory view while leaving the file bytes untouched. The
+// on-disk migration only happens once a locked write path runs.
+func TestLoadDesktopUserConfigForViewDoesNotPersistLegacyProviderAccess(t *testing.T) {
+	isolateDesktopUserDirs(t)
+	userPath := config.UserConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "default_model = \"local/m1\"\n\n[[providers]]\nname = \"local\"\nbase_url = \"http://127.0.0.1:9999/v1\"\nmodels = [\"m1\"]\n"
+	if err := os.WriteFile(userPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	for name, load := range map[string]func() (*config.Config, string, error){
+		"view":                  app.loadDesktopUserConfigForView,
+		"view-with-credentials": app.loadDesktopUserConfigForViewWithCredentials,
+	} {
+		cfg, _, err := load()
+		if err != nil {
+			t.Fatalf("%s load: %v", name, err)
+		}
+		if len(cfg.Desktop.ProviderAccess) == 0 {
+			t.Fatalf("%s load should normalize legacy provider access in memory", name)
+		}
+		raw, err := os.ReadFile(userPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != legacy {
+			t.Fatalf("%s load must not rewrite the user config, got:\n%s", name, raw)
+		}
+	}
+
+	// The first locked write path persists the pending migration.
+	if err := app.applyConfigOnly(func(*config.Config) error { return nil }); err != nil {
+		t.Fatalf("applyConfigOnly: %v", err)
+	}
+	if !configDeclaresProviderAccess(userPath) {
+		t.Fatal("locked write path should persist the provider access migration to disk")
+	}
+	migrated := config.LoadForEditWithoutCredentials(userPath)
+	if len(migrated.Desktop.ProviderAccess) == 0 {
+		t.Fatalf("migrated config lost provider access: %v", migrated.Desktop.ProviderAccess)
+	}
+}
+
+// TestLoadDesktopUserConfigViewKeepsLegacyBotConfigMigrationInMemory locks the
+// same contract for the legacy bot-config migration: read paths (including the
+// bot runtime's credential-loading view) see the merged bot config in memory
+// without any file being written; the locked write path performs the on-disk
+// migration.
+func TestLoadDesktopUserConfigViewKeepsLegacyBotConfigMigrationInMemory(t *testing.T) {
+	isolateDesktopUserDirs(t)
+	userPath := config.UserConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userBody := "default_model = \"local/m1\"\n"
+	if err := os.WriteFile(userPath, []byte(userBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacyRoot := t.TempDir()
+	legacyPath := filepath.Join(legacyRoot, "reasonix.toml")
+	legacyBody := "[bot]\nenabled = true\nmodel = \"local/m1\"\n"
+	if err := os.WriteFile(legacyPath, []byte(legacyBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	app.tabs = map[string]*WorkspaceTab{
+		"t": {ID: "t", Scope: "project", WorkspaceRoot: legacyRoot, Ready: true},
+	}
+	app.activeTabID = "t"
+
+	assertFilesUntouched := func(step string) {
+		t.Helper()
+		rawUser, err := os.ReadFile(userPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(rawUser) != userBody {
+			t.Fatalf("%s must not rewrite the user config, got:\n%s", step, rawUser)
+		}
+		rawLegacy, err := os.ReadFile(legacyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(rawLegacy) != legacyBody {
+			t.Fatalf("%s must not rewrite the legacy config, got:\n%s", step, rawLegacy)
+		}
+	}
+
+	cfg, _, err := app.loadDesktopUserConfigForView()
+	if err != nil {
+		t.Fatalf("loadDesktopUserConfigForView: %v", err)
+	}
+	if !cfg.Bot.Enabled {
+		t.Fatal("view load should merge the legacy bot config in memory")
+	}
+	assertFilesUntouched("loadDesktopUserConfigForView")
+
+	botCfg, err := app.loadDesktopBotConfig()
+	if err != nil {
+		t.Fatalf("loadDesktopBotConfig: %v", err)
+	}
+	if !botCfg.Bot.Enabled {
+		t.Fatal("bot runtime load should see the merged legacy bot config")
+	}
+	assertFilesUntouched("loadDesktopBotConfig")
+
+	// The first locked write path migrates the bot config into the user file.
+	if err := app.applyConfigOnly(func(*config.Config) error { return nil }); err != nil {
+		t.Fatalf("applyConfigOnly: %v", err)
+	}
+	migrated := config.LoadForEditWithoutCredentials(userPath)
+	if !migrated.Bot.Enabled {
+		t.Fatal("locked write path should persist the legacy bot config migration")
+	}
+	rawLegacy, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rawLegacy) != legacyBody {
+		t.Fatalf("migration must not rewrite the legacy config, got:\n%s", rawLegacy)
 	}
 }

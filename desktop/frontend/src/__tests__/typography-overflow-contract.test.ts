@@ -113,6 +113,10 @@ eq(
   "var(--statusbar-dock-height)",
   "status bar min-height follows the scaled dock token",
 );
+eq(finalDeclaration(".provider-template-grid", "grid-auto-rows"), "92px", "provider preset cards use compact equal-height grid rows");
+eq(finalDeclaration(".provider-template-card", "height"), "100%", "provider preset cards stretch to the grid row height");
+eq(finalDeclaration(".provider-template-card strong", "-webkit-line-clamp"), "1", "provider preset card titles clamp to one line");
+eq(finalDeclaration(".provider-template-card span", "-webkit-line-clamp"), "2", "provider preset card descriptions clamp to two lines");
 
 eq(finalDeclaration(".statusbar", "white-space"), "nowrap", "status bar keeps metrics on one row");
 eq(finalDeclaration(".statusbar", "overflow"), "hidden", "status bar clips instead of overflowing");

@@ -10,6 +10,17 @@ import (
 	"reasonix/internal/config"
 )
 
+func TestAllowlistUserCountIncludesRoles(t *testing.T) {
+	allowlist := config.BotAllowlist{
+		FeishuApprovers: []string{"ou-approver"},
+		FeishuAdmins:    []string{"ou-admin"},
+	}
+
+	if got := AllowlistUserCount(allowlist); got != 2 {
+		t.Fatalf("AllowlistUserCount() = %d, want role users included", got)
+	}
+}
+
 func TestRemoteRemembererKeepsDistinctGroupUsers(t *testing.T) {
 	isolateUserConfig(t)
 	cfg := config.Default()
@@ -363,10 +374,12 @@ func TestConnectionChannelConfigsCarrySessionMappingsOnlyPerConnection(t *testin
 			WorkspaceRoot: "/connection",
 			SessionMappings: []config.BotConnectionSessionMapping{{
 				RemoteID:      "wx-group-1",
+				SessionID:     "path:/tmp/reasonix-session.jsonl",
 				ChatType:      string(bot.ChatGroup),
 				UserID:        "wx-user-1",
 				Scope:         "project",
 				WorkspaceRoot: "/mapped",
+				UpdatedAt:     "2026-07-04T12:00:00Z",
 			}},
 		},
 	}
@@ -376,7 +389,7 @@ func TestConnectionChannelConfigsCarrySessionMappingsOnlyPerConnection(t *testin
 	if len(mappings) != 1 {
 		t.Fatalf("connection mappings = %+v, want one mapping", mappings)
 	}
-	if got := mappings[0]; got.RemoteID != "wx-group-1" || got.ChatType != string(bot.ChatGroup) || got.UserID != "wx-user-1" || got.WorkspaceRoot != "/mapped" {
+	if got := mappings[0]; got.RemoteID != "wx-group-1" || got.SessionID != "path:/tmp/reasonix-session.jsonl" || got.ChatType != string(bot.ChatGroup) || got.UserID != "wx-user-1" || got.WorkspaceRoot != "/mapped" || got.UpdatedAt == "" {
 		t.Fatalf("connection mapping = %+v, want copied routing fields", got)
 	}
 
@@ -388,6 +401,23 @@ func TestConnectionChannelConfigsCarrySessionMappingsOnlyPerConnection(t *testin
 	noWorkspace := ConnectionChannelConfigs(connections, true, false)
 	if got := noWorkspace["weixin-weixin"].SessionMappings; len(got) != 0 {
 		t.Fatalf("connection mappings with includeWorkspaceRoot=false = %+v, want none", got)
+	}
+}
+
+func TestRouteConfigsPreserveRemoteOverrides(t *testing.T) {
+	routes := RouteConfigs([]config.BotRouteConfig{
+		{ConnectionID: "feishu-lark", Platform: "feishu", ChatType: "group", ChatID: "group-1", Model: "route-model", WorkspaceRoot: "/route", ToolApprovalMode: "full-access"},
+		{ConnectionID: "empty-route"},
+	}, true, true)
+	if len(routes) != 1 {
+		t.Fatalf("routes = %+v, want one non-empty route", routes)
+	}
+	got := routes[0]
+	if got.ConnectionID != "feishu-lark" || got.Platform != bot.PlatformFeishu || got.ChatType != bot.ChatGroup || got.ChatID != "group-1" {
+		t.Fatalf("route match fields = %+v, want trimmed remote match", got)
+	}
+	if got.Channel.Model != "route-model" || got.Channel.WorkspaceRoot != "/route" || got.Channel.ToolApprovalMode != "yolo" {
+		t.Fatalf("route channel = %+v, want normalized overrides", got.Channel)
 	}
 }
 

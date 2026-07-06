@@ -186,6 +186,15 @@ func TestRenderTOMLRoundTrips(t *testing.T) {
 	orig.Skills.DisabledSkills = []string{"review", "explore"}
 	orig.Skills.MaxDepth = 2
 	orig.Bot.ToolApprovalMode = "auto"
+	orig.Bot.Control = BotControlConfig{Enabled: true, Addr: "127.0.0.1:39001", TokenEnv: "BOT_CONTROL_TOKEN"}
+	orig.Bot.Routes = []BotRouteConfig{{
+		ConnectionID:     "feishu-lark",
+		ChatType:         "group",
+		ChatID:           "oc_group",
+		Model:            "deepseek-pro",
+		ToolApprovalMode: "ask",
+		WorkspaceRoot:    "/tmp/reasonix-route",
+	}}
 	orig.Bot.Connections = []BotConnectionConfig{{
 		ID:               "feishu-lark",
 		Provider:         "feishu",
@@ -227,6 +236,8 @@ func TestRenderTOMLRoundTrips(t *testing.T) {
 	mm.ChatURL = "http://localhost:8000/v1/chat/completions"
 	mm.ModelsURL = "http://localhost:8000/v1/models"
 	mm.ReasoningProtocol = "openai"
+	mm.PresetID = "mimo-api"
+	mm.PresetVersion = ProviderPresetVersion
 	ds, _ := orig.Provider("deepseek-flash")
 	ds.Effort = "max"
 
@@ -302,6 +313,12 @@ func TestRenderTOMLRoundTrips(t *testing.T) {
 	}
 	if got.Bot.ToolApprovalMode != "auto" || got.Bot.Connections[0].ToolApprovalMode != "yolo" {
 		t.Errorf("bot tool approval mode not preserved: bot=%q connection=%q", got.Bot.ToolApprovalMode, got.Bot.Connections[0].ToolApprovalMode)
+	}
+	if !got.Bot.Control.Enabled || got.Bot.Control.Addr != "127.0.0.1:39001" || got.Bot.Control.TokenEnv != "BOT_CONTROL_TOKEN" {
+		t.Errorf("bot control not preserved: %+v", got.Bot.Control)
+	}
+	if len(got.Bot.Routes) != 1 || got.Bot.Routes[0].WorkspaceRoot != "/tmp/reasonix-route" || got.Bot.Routes[0].ChatID != "oc_group" {
+		t.Errorf("bot routes not preserved: %+v", got.Bot.Routes)
 	}
 	if len(got.Bot.Connections[0].SessionMappings) != 1 || got.Bot.Connections[0].SessionMappings[0].Scope != "project" || got.Bot.Connections[0].SessionMappings[0].WorkspaceRoot != "/tmp/reasonix-bot" {
 		t.Errorf("bot session mapping scope not preserved: %+v", got.Bot.Connections[0].SessionMappings)
@@ -384,6 +401,9 @@ func TestRenderTOMLRoundTrips(t *testing.T) {
 	}
 	if g, _ := got.Provider("mimo-pro"); g == nil || g.BaseURL != "http://localhost:8000/v1" || g.ChatURL != "http://localhost:8000/v1/chat/completions" || g.ModelsURL != "http://localhost:8000/v1/models" || g.ReasoningProtocol != "openai" {
 		t.Errorf("mimo-pro endpoint fields not preserved: %+v", g)
+	}
+	if g, _ := got.Provider("mimo-pro"); g == nil || g.PresetID != "mimo-api" || g.PresetVersion != ProviderPresetVersion {
+		t.Errorf("mimo-pro preset metadata not preserved: %+v", g)
 	}
 	if g, _ := got.Provider("deepseek-flash"); g == nil || g.Effort != "max" {
 		t.Errorf("deepseek-flash effort not preserved: %+v", g)
@@ -862,6 +882,7 @@ func TestRenderTOMLRoundTripsProviderHeadersAndModelOverrides(t *testing.T) {
 				"mode": "fast",
 			},
 		},
+		AuthHeader: true,
 		ModelOverrides: map[string]ProviderModelOverride{
 			"deepseek-v4-flash": {
 				ReasoningProtocol: ReasoningProtocolDeepSeek,
@@ -878,6 +899,9 @@ func TestRenderTOMLRoundTripsProviderHeadersAndModelOverrides(t *testing.T) {
 	}
 	if !strings.Contains(rendered, `extra_body`) || !strings.Contains(rendered, `"enable_thinking" = true`) {
 		t.Fatalf("rendered TOML missing extra_body:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `auth_header = true`) {
+		t.Fatalf("rendered TOML missing auth_header:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, `model_overrides`) || !strings.Contains(rendered, `reasoning_protocol = "deepseek"`) {
 		t.Fatalf("rendered TOML missing model overrides:\n%s", rendered)
@@ -896,6 +920,9 @@ func TestRenderTOMLRoundTripsProviderHeadersAndModelOverrides(t *testing.T) {
 	}
 	if p.ExtraBody["enable_thinking"] != true || p.ExtraBody["top_p"] != 0.8 {
 		t.Fatalf("extra_body after round trip = %+v", p.ExtraBody)
+	}
+	if !p.AuthHeader {
+		t.Fatal("auth_header after round trip = false, want true")
 	}
 	metadata, ok := p.ExtraBody["metadata"].(map[string]any)
 	if !ok || metadata["mode"] != "fast" {
@@ -1054,5 +1081,130 @@ func TestRenderTOMLDefaultStepsDoNotOverrideGlobalConfig(t *testing.T) {
 	}
 	if cfg.Agent.MaxSteps != 100 {
 		t.Errorf("after project: max_steps = %d, want 100 (global should not be overridden by commented-out default)", cfg.Agent.MaxSteps)
+	}
+}
+
+func TestIsolatedHomeDirEmptyByDefault(t *testing.T) {
+	t.Setenv("REASONIX_HOME", "")
+	if got := IsolatedHomeDir(); got != "" {
+		t.Fatalf("IsolatedHomeDir() = %q, want empty", got)
+	}
+}
+
+func TestIsolatedHomeDirReturnsCleanPath(t *testing.T) {
+	raw := filepath.Join(t.TempDir(), "isolated-reasonix")
+	t.Setenv("REASONIX_HOME", raw)
+	got := IsolatedHomeDir()
+	if filepath.Clean(got) != filepath.Clean(raw) {
+		t.Fatalf("IsolatedHomeDir() = %q, want %q", got, raw)
+	}
+}
+
+func TestLegacyOSSupportDirEmptyWhenIsolated(t *testing.T) {
+	isolateUserConfigHome(t)
+	t.Setenv("REASONIX_HOME", filepath.Join(t.TempDir(), "isolated-home"))
+	if got := legacyOSSupportDir(); got != "" {
+		t.Fatalf("legacyOSSupportDir() = %q, want empty when isolated", got)
+	}
+}
+
+func TestLegacyXDGConfigPathsEmptyWhenIsolated(t *testing.T) {
+	isolateUserConfigHome(t)
+	t.Setenv("REASONIX_HOME", filepath.Join(t.TempDir(), "isolated-home"))
+	if got := legacyXDGConfigPaths(); got != nil {
+		t.Fatalf("legacyXDGConfigPaths() = %v, want nil when isolated", got)
+	}
+}
+
+func TestCacheDirHonorsReasonixHome(t *testing.T) {
+	home := t.TempDir()
+	isolated := filepath.Join(home, "isolated-home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("REASONIX_HOME", isolated)
+
+	got := CacheDir()
+	want := filepath.Join(isolated, "cache")
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("CacheDir() = %q, want %q", got, want)
+	}
+}
+
+func TestCacheDirHonorsReasonixCacheHomeOverReasonixHome(t *testing.T) {
+	home := t.TempDir()
+	cacheHome := filepath.Join(home, "custom-cache")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("REASONIX_HOME", filepath.Join(home, "isolated-home"))
+	t.Setenv("REASONIX_CACHE_HOME", cacheHome)
+
+	got := CacheDir()
+	want := cacheHome
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("CacheDir() = %q, want %q (REASONIX_CACHE_HOME must win)", got, want)
+	}
+}
+
+func TestUserConfigLoadPathNoLegacyFallbackWhenIsolated(t *testing.T) {
+	home := isolateUserConfigHome(t)
+	isolated := filepath.Join(home, "isolated-home")
+	t.Setenv("REASONIX_HOME", isolated)
+
+	// Create a legacy config at the OS production path — it must not be loaded.
+	productionHome := expectedDefaultReasonixHome(home)
+	if err := os.MkdirAll(productionHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(productionHome, "config.toml"), []byte("default_model = \"production/model\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The primary config under isolated home does not exist yet.
+	got := userConfigLoadPath()
+	want := filepath.Join(isolated, "config.toml")
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("userConfigLoadPath() = %q, want %q (must not fall back to production legacy config)", got, want)
+	}
+}
+
+func TestCredentialSourceCandidatesSkipHomeEnvWhenIsolated(t *testing.T) {
+	isolateUserConfigHome(t)
+	t.Setenv("REASONIX_HOME", filepath.Join(t.TempDir(), "isolated-home"))
+
+	// Write a key into the production home .env — it must not appear as a source.
+	if home, err := os.UserHomeDir(); err == nil {
+		if err := os.WriteFile(filepath.Join(home, ".env"), []byte("LEAKED_KEY=leaked-value\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	candidates := credentialSourceCandidates(".")
+	for _, c := range candidates {
+		if c.Kind == CredentialSourceHomeEnv {
+			t.Fatalf("credentialSourceCandidates includes CredentialSourceHomeEnv when isolated: %v", c)
+		}
+	}
+}
+
+func TestMigrateLegacyIfNeededSkipsWhenIsolated(t *testing.T) {
+	home := isolateUserConfigHome(t)
+	isolated := filepath.Join(home, "isolated-home")
+	t.Setenv("REASONIX_HOME", isolated)
+
+	// Create a legacy config.json in production home — migration must skip it.
+	legacyDir := filepath.Join(home, ".reasonix")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "config.json"), []byte(`{"model":"production-model","apiKey":"sk-legacy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := MigrateLegacyIfNeeded()
+	if err != nil {
+		t.Fatalf("MigrateLegacyIfNeeded() error = %v", err)
+	}
+	if res != nil {
+		t.Fatalf("MigrateLegacyIfNeeded() = %+v, want nil when isolated", res)
 	}
 }

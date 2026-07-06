@@ -413,6 +413,7 @@ export interface SessionMeta {
   userId?: string;
   threadId?: string;
   sessionSource?: string;
+  recovered?: boolean; // conflict-recovery copy of another session
 }
 
 // SessionReference is a session selected via @ past:chats for context injection.
@@ -668,6 +669,7 @@ export interface ServerView {
   tools: number;
   prompts: number;
   resources: number;
+  hasTools?: boolean;
   error?: string;
   toolList?: MCPToolView[];
   trustedReadOnlyTools?: string[];
@@ -878,6 +880,7 @@ export interface ProviderView {
   apiKeyEnv: string;
   headers?: Record<string, string> | null; // optional extra request headers for compatible gateways
   extraBody?: Record<string, unknown> | null; // optional extra top-level request body fields for compatible gateways
+  authHeader?: boolean; // Anthropic-compatible: send Authorization: Bearer instead of x-api-key
   keySet: boolean; // the env var currently resolves to a value
   requiresKey?: boolean; // false for explicit no-auth providers
   configured?: boolean; // selectable: key is set or no key is required
@@ -890,6 +893,23 @@ export interface ProviderView {
   supportedEfforts: string[]; // custom /effort levels; empty = use built-in Kind/BaseURL default
   defaultEffort: string; // /effort level when user picks "auto" or unset; "" = supportedEfforts[0]
   modelOverrides?: ProviderModelOverrideView[] | null;
+}
+
+export interface ProviderPresetView {
+  id: string;
+  label: string;
+  description: string;
+  keyEnv: string;
+  providerNames: string[];
+  models: string[];
+  added: boolean;
+  status?: "available" | "installed" | "installed_modified" | "name_conflict" | "similar_existing";
+  statusProviderNames?: string[];
+  keySet: boolean;
+  requiresKey?: boolean;
+  configured?: boolean;
+  keySource?: string;
+  keySourcePath?: string;
 }
 
 export interface ProviderModelOverrideView {
@@ -966,9 +986,55 @@ export interface BotAllowlistView {
   qqUsers: string[];
   feishuUsers: string[];
   weixinUsers: string[];
+  qqApprovers: string[];
+  feishuApprovers: string[];
+  weixinApprovers: string[];
+  qqAdmins: string[];
+  feishuAdmins: string[];
+  weixinAdmins: string[];
   qqGroups: string[];
   feishuGroups: string[];
   weixinGroups: string[];
+}
+
+export interface BotAccessView {
+  enabled: boolean;
+  allowAll: boolean;
+  pairingEnabled: boolean;
+  users: string[];
+  groups: string[];
+  approvers: string[];
+  admins: string[];
+}
+
+export interface BotSelfUserIDsView {
+  qq: string[];
+  feishu: string[];
+  weixin: string[];
+}
+
+export interface BotPairingView {
+  enabled: boolean;
+  requestTtlMinutes: number;
+  maxPendingPerPlatform: number;
+}
+
+export interface BotControlView {
+  enabled: boolean;
+  addr: string;
+  tokenEnv: string;
+}
+
+export interface BotRouteView {
+  connectionId: string;
+  platform: string;
+  chatType: string;
+  chatId: string;
+  userId: string;
+  threadId: string;
+  model: string;
+  toolApprovalMode: ToolApprovalMode | "" | string;
+  workspaceRoot: string;
 }
 
 export interface QQBotView {
@@ -977,6 +1043,10 @@ export interface QQBotView {
   appSecretEnv: string;
   secretSet: boolean;
   sandbox: boolean;
+  model: string;
+  toolApprovalMode: ToolApprovalMode | "" | string;
+  workspaceRoot: string;
+  access: BotAccessView;
 }
 
 export interface FeishuBotView {
@@ -1029,6 +1099,7 @@ export interface BotConnectionView {
   model: string;
   toolApprovalMode: ToolApprovalMode | "" | string;
   workspaceRoot: string;
+  access: BotAccessView;
   credential: BotConnectionCredentialView;
   sessionMappings: BotConnectionSessionMappingView[];
   lastError: string;
@@ -1042,6 +1113,14 @@ export interface BotSettingsView {
   toolApprovalMode: ToolApprovalMode | "" | string;
   maxSteps: number;
   debounceMs: number;
+  queueMode: string;
+  queueCap: number;
+  queueDrop: string;
+  ignoreSelfMessages: boolean;
+  selfUserIds: BotSelfUserIDsView;
+  control: BotControlView;
+  pairing: BotPairingView;
+  routes: BotRouteView[];
   allowlist: BotAllowlistView;
   qq: QQBotView;
   feishu: FeishuBotView;
@@ -1117,6 +1196,7 @@ export interface SettingsView {
   autoPlan: string;
   providers: ProviderView[];
   officialProviders: ProviderView[];
+  providerPresets: ProviderPresetView[];
   permissions: PermissionsView;
   sandbox: SandboxView;
   network: NetworkView;
