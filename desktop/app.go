@@ -780,14 +780,14 @@ func (a *App) SubmitToTab(tabID, input string) error {
 	// loop machine code reachable from the Wails build.
 	if strings.HasPrefix(trimmed, "/loop") {
 		if ctrl == nil {
-			return workspaceNotReadyErr(tab)
+			return a.workspaceNotReadyErr(tab)
 		}
 		if err := a.ensureTabControllerWorkspace(tab); err != nil {
 			return err
 		}
 		ctrl = tab.Ctrl
 		if ctrl == nil {
-			return workspaceNotReadyErr(tab)
+			return a.workspaceNotReadyErr(tab)
 		}
 		ctrl.ApplyLoopCommand(trimmed)
 		return nil
