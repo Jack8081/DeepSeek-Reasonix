@@ -107,7 +107,10 @@ func (l *loopMachine) startLoop(cfg loopConfig) {
 			}
 
 			tick++
-			input := cfg.prompt
+				input := cfg.prompt
+				if cfg.interval <= 0 {
+					input = loopContinuationInput(cfg.prompt, tick)
+				}
 			estNext := time.Now().Add(delay)
 			l.publish(stopCh, func() {
 				l.nextRun = estNext
@@ -202,6 +205,15 @@ func (l *loopMachine) Running() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.running
+}
+
+// loopContinuationInput wraps the user's prompt for self-paced iterations.
+// Unlike the old selfPacedLoopTurnInput, it does NOT instruct the model to
+// emit [loop:done]/[loop:blocked:] markers — the loop never stops itself.
+// It only tells the model which iteration this is and that earlier work is
+// visible in the session, so it can continue rather than restarting.
+func loopContinuationInput(prompt string, tick int) string {
+	return fmt.Sprintf("[Loop iteration %d — continue from where the previous iteration left off. Earlier work is visible in this session.] %s", tick, prompt)
 }
 
 // LoopStartNotice is the user-facing confirmation for a started loop.

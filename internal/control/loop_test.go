@@ -1,6 +1,7 @@
 package control
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,10 +230,13 @@ func TestLoopMachineSelfPacedRunsContinuously(t *testing.T) {
 		t.Fatalf("expected at least 3 iterations, got %d", n)
 	}
 
-	// Inputs should be the raw prompt (not wrapped with marker instructions).
+	// Inputs should contain the prompt (wrapped with minimal iteration marker).
 	for i, in := range inputs {
-		if in != "build the feature" {
-			t.Errorf("iteration %d input = %q, want raw prompt %q", i+1, in, "build the feature")
+		if !strings.Contains(in, "build the feature") {
+			t.Errorf("iteration %d input = %q, want input containing %q", i+1, in, "build the feature")
+		}
+		if !strings.Contains(in, "Loop iteration") {
+			t.Errorf("iteration %d input missing loop iteration marker: %q", i+1, in)
 		}
 	}
 
