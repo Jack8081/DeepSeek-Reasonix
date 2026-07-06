@@ -20,12 +20,15 @@ import (
 	"time"
 	"unsafe"
 
+	"reasonix/internal/proc"
+
 	"golang.org/x/sys/windows"
 )
 
 const (
 	procThreadAttributeSecurityCapabilities = 0x00020009
 	startupFlagsUseStdHandles               = windows.STARTF_USESTDHANDLES
+	startupFlagsHiddenWindow                = startupFlagsUseStdHandles | windows.STARTF_USESHOWWINDOW
 	hresultAlreadyExists                    = 0x800700b7
 	allApplicationPackagesSID               = "S-1-15-2-1"
 	allRestrictedApplicationPackagesSID     = "S-1-15-2-2"
@@ -83,7 +86,7 @@ func runWindowsSandboxed(spec Spec, argv []string, opts RunOptions) (int, error)
 	}
 	// Serialize against concurrent runs touching the same roots and clear any
 	// deny residue left by a crashed run before we mutate ACLs.
-	lock, err := lockWindowsRoots(windowsMutatedRootsForRun(spec, argv[0]), lockWaitNotice(opts))
+	lock, err := lockWindowsRoots(windowsMutatedRootsForRun(spec, argv[0]), lockWaitNotice(opts), lockHolderLabel(argv), spec.LockWait)
 	if err != nil {
 		return 0, err
 	}
@@ -163,7 +166,7 @@ func runWindowsRestrictedSandboxed(spec Spec, argv []string, opts RunOptions) (i
 	}
 	// Serialize against concurrent runs touching the same roots and clear any
 	// deny residue left by a crashed run before we mutate ACLs.
-	lock, err := lockWindowsRoots(windowsMutatedRootsForRun(spec, argv[0]), lockWaitNotice(opts))
+	lock, err := lockWindowsRoots(windowsMutatedRootsForRun(spec, argv[0]), lockWaitNotice(opts), lockHolderLabel(argv), spec.LockWait)
 	if err != nil {
 		return 0, err
 	}
@@ -415,15 +418,9 @@ func startRestrictedTokenProcess(token windows.Token, argv []string, env []strin
 		}
 	}
 
-	si := windows.StartupInfoEx{}
-	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
-	si.StartupInfo.Flags = startupFlagsUseStdHandles
-	si.StartupInfo.StdInput = handles[0]
-	si.StartupInfo.StdOutput = handles[1]
-	si.StartupInfo.StdErr = handles[2]
-	si.ProcThreadAttributeList = attrList.List()
+	si := windowsSandboxStartupInfo(handles, attrList)
 
-	flags := uint32(windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_SUSPENDED)
+	flags := windowsSandboxProcessCreationFlags()
 	if err := windows.CreateProcessAsUser(token, appName, cmdLine, nil, nil, true, flags, envp, cwd, &si.StartupInfo, &pi); err != nil {
 		return pi, fmt.Errorf("create restricted process: %w", err)
 	}
@@ -487,19 +484,34 @@ func startAppContainerProcess(ac *appContainerLaunch, argv []string, env []strin
 		}
 	}
 
-	si := windows.StartupInfoEx{}
-	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
-	si.StartupInfo.Flags = startupFlagsUseStdHandles
-	si.StartupInfo.StdInput = handles[0]
-	si.StartupInfo.StdOutput = handles[1]
-	si.StartupInfo.StdErr = handles[2]
-	si.ProcThreadAttributeList = attrList.List()
+	si := windowsSandboxStartupInfo(handles, attrList)
 
-	flags := uint32(windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_SUSPENDED)
+	flags := windowsSandboxProcessCreationFlags()
 	if err := windows.CreateProcess(appName, cmdLine, nil, nil, true, flags, envp, cwd, &si.StartupInfo, &pi); err != nil {
 		return pi, fmt.Errorf("create appcontainer process: %w", err)
 	}
 	return pi, nil
+}
+
+func windowsSandboxStartupInfo(handles [3]windows.Handle, attrList *windows.ProcThreadAttributeListContainer) windows.StartupInfoEx {
+	si := windows.StartupInfoEx{}
+	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
+	si.StartupInfo.Flags = startupFlagsHiddenWindow
+	si.StartupInfo.ShowWindow = uint16(windows.SW_HIDE)
+	si.StartupInfo.StdInput = handles[0]
+	si.StartupInfo.StdOutput = handles[1]
+	si.StartupInfo.StdErr = handles[2]
+	if attrList != nil {
+		si.ProcThreadAttributeList = attrList.List()
+	}
+	return si
+}
+
+func windowsSandboxProcessCreationFlags() uint32 {
+	return uint32(windows.CREATE_UNICODE_ENVIRONMENT |
+		windows.EXTENDED_STARTUPINFO_PRESENT |
+		windows.CREATE_SUSPENDED |
+		windows.CREATE_NO_WINDOW)
 }
 
 func resolveWindowsExecutable(name string) (string, error) {
@@ -1037,7 +1049,7 @@ func icacls(root string, args ...string) error {
 	all := append([]string{root}, args...)
 	ctx, cancel := context.WithTimeout(context.Background(), icaclsTimeoutForArgs(args))
 	defer cancel()
-	cmd := exec.CommandContext(ctx, systemRootTool("icacls.exe"), all...)
+	cmd := hiddenWindowsSystemCommandContext(ctx, "icacls.exe", all...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -1054,7 +1066,7 @@ func icacls(root string, args ...string) error {
 		return nil
 	case <-ctx.Done():
 		if cmd.Process != nil {
-			_ = exec.Command(systemRootTool("taskkill.exe"), "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+			_ = hiddenWindowsSystemCommand("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
 			_ = cmd.Process.Kill()
 		}
 		select {
@@ -1066,6 +1078,18 @@ func icacls(root string, args ...string) error {
 		}
 		return fmt.Errorf("icacls %q %s: timed out", root, strings.Join(args, " "))
 	}
+}
+
+func hiddenWindowsSystemCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, systemRootTool(name), args...)
+	proc.HideWindow(cmd)
+	return cmd
+}
+
+func hiddenWindowsSystemCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(systemRootTool(name), args...)
+	proc.HideWindow(cmd)
+	return cmd
 }
 
 func setLowIntegrity(root string) error {

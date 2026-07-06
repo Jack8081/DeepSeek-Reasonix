@@ -264,6 +264,11 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 			environment.RunProbesWithOptions(ctx, environment.DefaultProbes(), environment.ProbeOptions{
 				Overrides: cfg.Environment.Tools,
 				DenyRoots: []string{root},
+				// Persist probe results across restarts: the section below sits
+				// inside the provider-cached prompt prefix, and re-observing
+				// per boot let transient probe flaps (timeouts, PATH drift)
+				// rewrite the prefix and cold-start every session's cache.
+				SnapshotDir: config.CacheDir(),
 			}),
 			runtime.GOOS+"/"+runtime.GOARCH,
 			shellLabel,

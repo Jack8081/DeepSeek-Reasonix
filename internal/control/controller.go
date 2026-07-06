@@ -3092,6 +3092,7 @@ func (c *Controller) recoverSnapshotConflict(path string, saveErr error, forceRe
 	c.mu.Unlock()
 	c.setActiveJobSession(info.Path)
 	c.rebindCheckpoints(info.Path)
+	c.transplantInFlightTurnMarker(path, info.Path)
 	slog.Warn("controller: snapshot conflict; forked recovery branch",
 		append(logAttrs, "recovery", info.Path, "existing", info.Existing)...)
 	c.sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelWarn,
@@ -3139,6 +3140,35 @@ func (c *Controller) clearInFlightTurn() {
 	}
 }
 
+// transplantInFlightTurnMarker moves a pending in-flight-turn marker from the
+// session path a recovery fork abandoned onto the branch the turn continues
+// on. Left behind, the stale marker would fire recoverInterruptedTurn on the
+// next open of the original branch and strip messages from a turn that in
+// fact kept running on the recovery branch; missing from the recovery branch,
+// a crash before turn end would leave its partial tail unmarked.
+func (c *Controller) transplantInFlightTurnMarker(fromPath, toPath string) {
+	if strings.TrimSpace(fromPath) == "" || strings.TrimSpace(toPath) == "" || fromPath == toPath {
+		return
+	}
+	meta, ok, err := agent.LoadBranchMeta(fromPath)
+	if err != nil || !ok || meta.InFlightTurn == nil {
+		if err != nil {
+			slog.Warn("controller: load in-flight turn marker for transplant", "path", fromPath, "err", err)
+		}
+		return
+	}
+	marker := meta.InFlightTurn
+	if err := agent.MarkSessionInFlightTurn(toPath, marker.StartMessageIndex, marker.PreserveUser); err != nil {
+		// Keep the original marker: a turn boundary on the wrong branch beats
+		// no boundary anywhere if the runtime dies before the turn completes.
+		slog.Warn("controller: transplant in-flight turn marker", "path", toPath, "err", err)
+		return
+	}
+	if err := agent.ClearSessionInFlightTurn(fromPath); err != nil {
+		slog.Warn("controller: clear in-flight turn marker on forked-from branch", "path", fromPath, "err", err)
+	}
+}
+
 func (c *Controller) recoverInterruptedTurn(path string) {
 	if c.executor == nil || path == "" {
 		return
@@ -3151,6 +3181,18 @@ func (c *Controller) recoverInterruptedTurn(path string) {
 		return
 	}
 	marker := meta.InFlightTurn
+	if interruptedTurnContinuedOnRecoveryBranch(path, marker) {
+		// The "interrupted" turn did not die with a runtime: a recovery branch
+		// forked off this session after the marker was set, so the turn kept
+		// running (and completing) there. Runtimes predating the marker
+		// transplant in recoverSnapshotConflict left the marker behind on the
+		// forked-from branch; stripping now would truncate a transcript the
+		// completed turn already superseded. Clear the stale marker instead.
+		if err := agent.ClearSessionInFlightTurn(path); err != nil {
+			slog.Warn("controller: clear fork-orphaned in-flight turn", "err", err)
+		}
+		return
+	}
 	msgs := c.executor.Session().Snapshot()
 	changed := marker.StartMessageIndex >= 0 && len(msgs) > marker.StartMessageIndex
 	if changed {
@@ -3166,6 +3208,31 @@ func (c *Controller) recoverInterruptedTurn(path string) {
 	if err := agent.ClearSessionInFlightTurn(path); err != nil {
 		slog.Warn("controller: clear stale in-flight turn", "err", err)
 	}
+}
+
+// interruptedTurnContinuedOnRecoveryBranch reports whether a recovery branch
+// forked off path after its in-flight-turn marker was set. Markers only exist
+// while a turn runs and recovery forks happen on saves, so a child recovery
+// branch younger than the marker means the marked turn itself moved there —
+// the marker is a leftover from a runtime that switched paths mid-turn, not a
+// crashed turn whose partial tail needs stripping. A marker without a start
+// time is treated as continued whenever any recovery child exists: erring
+// toward keeping messages is the data-safe direction.
+func interruptedTurnContinuedOnRecoveryBranch(path string, marker *agent.InFlightTurnMeta) bool {
+	if marker == nil {
+		return false
+	}
+	branches, err := agent.ListBranches(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	id := agent.BranchID(path)
+	for _, b := range branches {
+		if b.Recovered && b.ParentID == id && b.CreatedAt.After(marker.StartedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // stripTurnMessagesAfter truncates the executor's session to keep only messages

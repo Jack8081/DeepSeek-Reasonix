@@ -43,7 +43,12 @@ integrity label and restoring them afterward, so two runs touching the same root
 must not overlap. Each run takes a per-root named mutex (session-local
 namespace) for its whole lifetime; runs on disjoint roots proceed in parallel,
 runs on a shared root serialize. A crashed holder never deadlocks the next run
-because the OS marks its mutex abandoned.
+because the OS marks its mutex abandoned. The holder records its PID and a
+command preview next to each lock, so a queued run's notice and timeout error
+name what is blocking it. The queue wait defaults to 1 minute (an interactive
+command should fail fast with the holder named, not hang); a caller whose run
+nobody is blocked on — a background job — passes a longer `Spec.LockWait`
+budget.
 
 A writable run stamps a Low integrity label across its writable subtree and adds
 a deny ACE (including the current user's SID) for each forbid-read root. Both are
@@ -59,7 +64,7 @@ user out of a forbid-read path such as `~/.ssh`.
 | --- | --- |
 | `WINDOWS_SANDBOX_WAIT_MS` | Max wall-clock a sandboxed child may run before it is killed. |
 | `WINDOWS_SANDBOX_ICACLS_TIMEOUT_MS` | `icacls` timeout. Recursive (`/T`) operations default to a much larger ceiling than flat ones because they walk the whole subtree; this overrides both. |
-| `WINDOWS_SANDBOX_LOCK_MS` | Max wall-clock to wait for a busy per-root lock before failing with a clear error instead of hanging. |
+| `WINDOWS_SANDBOX_LOCK_MS` | Max wall-clock to wait for a busy per-root lock before failing with a clear error instead of hanging. Overrides both defaults (1 minute interactive, 10 minutes for background bash jobs); stop the command named in the error before raising this. |
 
 ## Network Semantics
 

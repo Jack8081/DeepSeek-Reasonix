@@ -411,8 +411,11 @@ low-integrity token 下，除配置的 root 外它仍能写入 Windows 对任何
 Windows 沙盒排障：沙盒会把 Reasonix 可执行文件自身以隐藏 helper 方式重新拉起，
 CLI 与桌面端都内置了这个 helper 入口——若某个构建缺少入口而又请求 enforce，
 bash 会以明确报错拒绝执行，而不是返回空输出。同一 workspace 上排队等待另一条
-沙盒命令时会打印一行“waiting for another sandboxed command”提示（等待上限
-`WINDOWS_SANDBOX_LOCK_MS`，默认 10 分钟）。如果只有 Git-for-Windows/MSYS2 bash
+沙盒命令时会打印一行“waiting for another sandboxed command”提示，并在可识别时
+标出持锁命令及其 PID。前台命令排队 1 分钟后即失败并给出同样的持锁信息（被挡住
+的回合应尽快报错，而不是挂住）；后台任务最多等 10 分钟，`WINDOWS_SANDBOX_LOCK_MS`
+可同时覆盖两者。应先停止提示中点名的命令；调大等待上限只会让后续命令等更久。
+如果只有 Git-for-Windows/MSYS2 bash
 下的沙盒命令失败，可试 `[tools.shell] prefer = "powershell"`——MSYS 运行时在
 low-integrity token 下较脆弱。运行 `reasonix doctor` 可查看解析到的 shell、沙盒
 可用性，以及项目 `reasonix.toml` 是否固定了 `[sandbox]`（项目文件优先级高于

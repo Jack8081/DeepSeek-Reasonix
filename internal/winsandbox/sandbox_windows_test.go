@@ -3,6 +3,7 @@
 package winsandbox
 
 import (
+	"context"
 	"net"
 	"os"
 	"os/exec"
@@ -78,6 +79,59 @@ func TestWindowsUniqueNonZeroHandles(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("handles = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestWindowsSandboxProcessCreationFlagsHideConsole(t *testing.T) {
+	flags := windowsSandboxProcessCreationFlags()
+	for _, want := range []uint32{
+		windows.CREATE_UNICODE_ENVIRONMENT,
+		windows.EXTENDED_STARTUPINFO_PRESENT,
+		windows.CREATE_SUSPENDED,
+		windows.CREATE_NO_WINDOW,
+	} {
+		if flags&want == 0 {
+			t.Fatalf("process creation flags %#x missing %#x", flags, want)
+		}
+	}
+}
+
+func TestWindowsSandboxStartupInfoHidesWindowAndKeepsStdHandles(t *testing.T) {
+	handles := [3]windows.Handle{11, 12, 13}
+	si := windowsSandboxStartupInfo(handles, nil)
+	if si.StartupInfo.Cb == 0 {
+		t.Fatal("startup info size was not initialized")
+	}
+	if si.StartupInfo.Flags&windows.STARTF_USESTDHANDLES == 0 {
+		t.Fatalf("startup flags %#x missing STARTF_USESTDHANDLES", si.StartupInfo.Flags)
+	}
+	if si.StartupInfo.Flags&windows.STARTF_USESHOWWINDOW == 0 {
+		t.Fatalf("startup flags %#x missing STARTF_USESHOWWINDOW", si.StartupInfo.Flags)
+	}
+	if si.StartupInfo.ShowWindow != windows.SW_HIDE {
+		t.Fatalf("ShowWindow = %d, want SW_HIDE", si.StartupInfo.ShowWindow)
+	}
+	if si.StartupInfo.StdInput != handles[0] || si.StartupInfo.StdOutput != handles[1] || si.StartupInfo.StdErr != handles[2] {
+		t.Fatalf("std handles = (%v,%v,%v), want %v", si.StartupInfo.StdInput, si.StartupInfo.StdOutput, si.StartupInfo.StdErr, handles)
+	}
+}
+
+func TestWindowsSandboxSystemCommandsAreHidden(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, cmd := range []*exec.Cmd{
+		hiddenWindowsSystemCommandContext(ctx, "icacls.exe", `C:\work`, "/C"),
+		hiddenWindowsSystemCommand("taskkill.exe", "/?"),
+	} {
+		if cmd.SysProcAttr == nil {
+			t.Fatal("system command SysProcAttr is nil")
+		}
+		if !cmd.SysProcAttr.HideWindow {
+			t.Fatal("system command did not set HideWindow")
+		}
+		if cmd.SysProcAttr.CreationFlags&windows.CREATE_NO_WINDOW == 0 {
+			t.Fatalf("system command creation flags %#x missing CREATE_NO_WINDOW", cmd.SysProcAttr.CreationFlags)
 		}
 	}
 }

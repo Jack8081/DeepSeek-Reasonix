@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"runtime"
 	"sync/atomic"
+	"time"
 )
 
 // WindowsHelperCommand is an internal CLI subcommand used only by the Windows
@@ -83,6 +84,13 @@ type Spec struct {
 	// Path) means the tool resolves one itself; the composition root sets it from
 	// [tools.shell] so the configured choice rides along with the spec.
 	Shell Shell
+	// WindowsLockWait bounds how long a Windows-sandboxed run may queue behind
+	// another sandboxed command on the same workspace before failing with a
+	// clear error naming the holder. Zero uses the short interactive default (a
+	// blocked foreground command should fail fast, not hang its turn); the bash
+	// tool passes a longer budget for background jobs, which nobody is blocked
+	// on. Other platforms ignore it. WINDOWS_SANDBOX_LOCK_MS overrides both.
+	WindowsLockWait time.Duration
 }
 
 // Enforce reports whether the spec asks for confinement.

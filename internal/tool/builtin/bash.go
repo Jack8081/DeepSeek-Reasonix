@@ -27,6 +27,12 @@ import (
 
 const (
 	bashWaitDelay = 5 * time.Second
+	// windowsBackgroundSandboxLockWait is the Windows sandbox root-lock wait
+	// budget for background jobs. A detached job blocks nobody while it queues,
+	// so it keeps the patient wait; a foreground command uses the sandbox's
+	// short default and fails fast with the lock holder named instead of
+	// hanging the whole turn.
+	windowsBackgroundSandboxLockWait = 10 * time.Minute
 )
 
 var errBashTimeout = errors.New("bash foreground timeout")
@@ -161,7 +167,11 @@ func (b bash) Execute(ctx context.Context, args json.RawMessage) (string, error)
 	}
 
 	// Wrap in the OS sandbox when configured; otherwise argv is just the shell.
-	argv, wrapped := bashSandboxCommand(b.sb, sh, p.Command)
+	sbSpec := b.sb
+	if p.RunInBackground {
+		sbSpec.WindowsLockWait = windowsBackgroundSandboxLockWait
+	}
+	argv, wrapped := bashSandboxCommand(sbSpec, sh, p.Command)
 	if b.sb.Enforce() && bashSandboxEscapeSessionAllowed(ctx, p.Command, args) {
 		argv = unconfinedShellArgv(sh, p.Command)
 		wrapped = false

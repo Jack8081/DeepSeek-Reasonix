@@ -38,7 +38,7 @@ func TestWindowsRootLockQueueEmitsNotice(t *testing.T) {
 	// Long enough for the contender to sit through one full silent slice
 	// (windowsRootLockNoticeAfter) and emit the queue notice before timing out.
 	t.Setenv("WINDOWS_SANDBOX_LOCK_MS", "5000")
-	held, err := lockWindowsRoots([]string{root}, nil)
+	held, err := lockWindowsRoots([]string{root}, nil, "", 0)
 	if err != nil {
 		t.Fatalf("hold lock: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestWindowsRootLockQueueEmitsNotice(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		lock, err := lockWindowsRoots([]string{root}, &notice)
+		lock, err := lockWindowsRoots([]string{root}, &notice, "", 0)
 		if err == nil {
 			lock.release()
 		}
@@ -68,6 +68,56 @@ func TestWindowsRootLockQueueEmitsNotice(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("contender never finished after release")
+	}
+}
+
+// A held root lock records its holder (pid + command label); a queued
+// contender's notice names that command so the user knows what to stop, and
+// release removes the record again.
+func TestWindowsRootLockHolderRecordedAndCleared(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("WINDOWS_SANDBOX_LOCK_MS", "5000")
+	held, err := lockWindowsRoots([]string{root}, nil, "npm run dev", 0)
+	if err != nil {
+		t.Fatalf("hold lock: %v", err)
+	}
+	name := windowsRootLockNames([]string{root})[0]
+	data, err := os.ReadFile(windowsLockHolderPath(name))
+	if err != nil {
+		t.Fatalf("holder record not written: %v", err)
+	}
+	rec, ok := parseLockHolderRecord(string(data))
+	if !ok || rec.pid != os.Getpid() || rec.label != "npm run dev" {
+		t.Fatalf("holder record = %+v ok=%v, want this process with label", rec, ok)
+	}
+
+	var notice lockNoticeBuffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		lock, err := lockWindowsRoots([]string{root}, &notice, "", 0)
+		if err == nil {
+			lock.release()
+		}
+	}()
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(notice.String(), `held by "npm run dev"`) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(notice.String(), `held by "npm run dev"`) {
+		t.Fatalf("queued notice never named the holder; got %q", notice.String())
+	}
+	held.release()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("contender never finished after release")
+	}
+	if pathExists(windowsLockHolderPath(name)) {
+		t.Fatal("holder record not removed after release")
 	}
 }
 
@@ -103,14 +153,14 @@ func TestWindowsRootLockSerializesSameRoot(t *testing.T) {
 	// the first releases. Use a short timeout so a regression fails fast.
 	t.Setenv("WINDOWS_SANDBOX_LOCK_MS", "2000")
 
-	first, err := lockWindowsRoots([]string{root}, nil)
+	first, err := lockWindowsRoots([]string{root}, nil, "", 0)
 	if err != nil {
 		t.Fatalf("first lock: %v", err)
 	}
 
 	acquired := make(chan *windowsRootLock, 1)
 	go func() {
-		second, err := lockWindowsRoots([]string{root}, nil)
+		second, err := lockWindowsRoots([]string{root}, nil, "", 0)
 		if err != nil {
 			acquired <- nil
 			return
@@ -140,7 +190,7 @@ func TestWindowsRootLockSerializesSameRoot(t *testing.T) {
 func TestWindowsRootLockTimesOutWhenHeld(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("WINDOWS_SANDBOX_LOCK_MS", "300")
-	held, err := lockWindowsRoots([]string{root}, nil)
+	held, err := lockWindowsRoots([]string{root}, nil, "", 0)
 	if err != nil {
 		t.Fatalf("hold lock: %v", err)
 	}
@@ -157,7 +207,7 @@ func TestWindowsRootLockTimesOutWhenHeld(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		start := time.Now()
-		lock, err := lockWindowsRoots([]string{root}, nil)
+		lock, err := lockWindowsRoots([]string{root}, nil, "", 0)
 		if lock != nil {
 			lock.release()
 		}
@@ -186,7 +236,7 @@ func TestWindowsRootLockMultiRootNoSelfDeadlock(t *testing.T) {
 	t.Setenv("WINDOWS_SANDBOX_LOCK_MS", "2000")
 	// Acquiring multiple roots in one call must not deadlock regardless of the
 	// order the caller passes them, because names are sorted internally.
-	lock, err := lockWindowsRoots([]string{b, a, b}, nil)
+	lock, err := lockWindowsRoots([]string{b, a, b}, nil, "", 0)
 	if err != nil {
 		t.Fatalf("multi-root lock: %v", err)
 	}

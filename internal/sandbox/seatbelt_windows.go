@@ -123,5 +123,6 @@ func convertWindowsSandboxSpec(spec Spec, writable bool) winsandbox.Spec {
 		Network:         spec.Network,
 		Writable:        writable,
 		TempPrefix:      "reasonix-sandbox-",
+		LockWait:        spec.WindowsLockWait,
 	}
 }

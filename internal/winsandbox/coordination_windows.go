@@ -44,10 +44,11 @@ import (
 // Trade-off: a long-running sandboxed command (including a background job)
 // holds its root's lock for its whole lifetime, so other sandboxed commands on
 // the same root queue behind it. That is the price of a mutation-based sandbox;
-// the alternative is boundary corruption. The wait is bounded
-// (WINDOWS_SANDBOX_LOCK_MS) so a stuck holder surfaces as a clear error instead
-// of an indefinite hang.
-const defaultWindowsRootLockTimeout = 10 * time.Minute
+// the alternative is boundary corruption. The wait is bounded (a short
+// interactive default, a longer Spec.LockWait budget for background jobs,
+// WINDOWS_SANDBOX_LOCK_MS overriding both — see lockinfo.go) so a stuck holder
+// surfaces as a clear error naming the holding command instead of an
+// indefinite hang.
 
 // stillActiveExitCode is STILL_ACTIVE: GetExitCodeProcess reports it while a
 // process is running. Used to tell a live marker-owner from a dead one.
@@ -64,23 +65,18 @@ const stillActiveExitCode = 259
 // the mutex.
 type windowsRootLock struct {
 	handles []windows.Handle
+	names   []string
 	pinned  bool
-}
-
-func windowsRootLockTimeout() time.Duration {
-	if raw := os.Getenv("WINDOWS_SANDBOX_LOCK_MS"); raw != "" {
-		if ms, err := strconv.ParseUint(raw, 10, 63); err == nil && ms > 0 {
-			return time.Duration(ms) * time.Millisecond
-		}
-	}
-	return defaultWindowsRootLockTimeout
 }
 
 // lockWindowsRoots serializes access to every distinct root in roots. The
 // returned lock must be released once the run's grants have been cleaned up.
 // notice, when non-nil, receives a one-line message if acquisition has to
 // queue behind another run for more than windowsRootLockNoticeAfter.
-func lockWindowsRoots(roots []string, notice io.Writer) (*windowsRootLock, error) {
+// holderLabel is this run's command preview, recorded so a queued command can
+// name what is blocking it; lockWait is the caller's wait budget (see
+// windowsRootLockTimeout).
+func lockWindowsRoots(roots []string, notice io.Writer, holderLabel string, lockWait time.Duration) (*windowsRootLock, error) {
 	names := windowsRootLockNames(roots)
 	if len(names) == 0 {
 		return &windowsRootLock{}, nil
@@ -90,7 +86,7 @@ func lockWindowsRoots(roots []string, notice io.Writer) (*windowsRootLock, error
 	// mutex is owned by, and released from, the same OS thread.
 	runtime.LockOSThread()
 	lock.pinned = true
-	timeout := windowsRootLockTimeout()
+	timeout := windowsRootLockTimeout(lockWait)
 	for _, name := range names {
 		h, err := acquireNamedMutex(name, timeout, notice)
 		if err != nil {
@@ -98,6 +94,8 @@ func lockWindowsRoots(roots []string, notice io.Writer) (*windowsRootLock, error
 			return nil, err
 		}
 		lock.handles = append(lock.handles, h)
+		lock.names = append(lock.names, name)
+		writeWindowsLockHolder(name, holderLabel)
 	}
 	return lock, nil
 }
@@ -111,10 +109,14 @@ func (l *windowsRootLock) release() {
 		if h == 0 {
 			continue
 		}
+		// Drop the holder record before releasing the mutex so the next owner
+		// never races its own record against ours.
+		removeWindowsLockHolder(l.names[i])
 		_ = windows.ReleaseMutex(h)
 		_ = windows.CloseHandle(h)
 	}
 	l.handles = nil
+	l.names = nil
 	if l.pinned {
 		runtime.UnlockOSThread()
 		l.pinned = false
@@ -182,7 +184,10 @@ func acquireNamedMutex(name string, timeout time.Duration, notice io.Writer) (wi
 			waited += slice
 			if timeout > 0 && waited >= timeout {
 				_ = windows.CloseHandle(h)
-				return 0, fmt.Errorf("timed out waiting for sandbox lock %q after %s", name, timeout)
+				if holder := describeWindowsLockHolder(name); holder != "" {
+					return 0, fmt.Errorf("timed out waiting for sandbox lock %q after %s (%s; stop that command or set WINDOWS_SANDBOX_LOCK_MS higher)", name, timeout, holder)
+				}
+				return 0, fmt.Errorf("timed out waiting for sandbox lock %q after %s (stop the earlier sandboxed command or set WINDOWS_SANDBOX_LOCK_MS higher)", name, timeout)
 			}
 			if !noticed && notice != nil {
 				noticed = true
@@ -190,7 +195,11 @@ func acquireNamedMutex(name string, timeout time.Duration, notice io.Writer) (wi
 				if timeout > 0 {
 					limit = timeout.String()
 				}
-				fmt.Fprintf(notice, "windows sandbox: waiting for another sandboxed command on this workspace to finish (lock wait limit %s; set WINDOWS_SANDBOX_LOCK_MS to adjust)\n", limit)
+				if holder := describeWindowsLockHolder(name); holder != "" {
+					fmt.Fprintf(notice, "windows sandbox: waiting for another sandboxed command on this workspace to finish (%s; lock wait limit %s; stop that command or set WINDOWS_SANDBOX_LOCK_MS to adjust)\n", holder, limit)
+				} else {
+					fmt.Fprintf(notice, "windows sandbox: waiting for another sandboxed command on this workspace to finish (lock wait limit %s; stop the earlier background/long-running command or set WINDOWS_SANDBOX_LOCK_MS to adjust)\n", limit)
+				}
 			}
 		default:
 			_ = windows.CloseHandle(h)
@@ -200,6 +209,46 @@ func acquireNamedMutex(name string, timeout time.Duration, notice io.Writer) (wi
 			return 0, fmt.Errorf("wait for sandbox lock %q returned %#x", name, event)
 		}
 	}
+}
+
+// Lock-holder records live under the same user-shared %TEMP% as the residue
+// markers, one file per root digest. All operations are best-effort: the record
+// is diagnostic, so a write or read failure must never affect the run.
+func windowsLockHolderDir() string {
+	return filepath.Join(os.TempDir(), "windows-sandbox-lockholders")
+}
+
+func windowsLockHolderPath(mutexName string) string {
+	return filepath.Join(windowsLockHolderDir(), lockHolderFileName(mutexName))
+}
+
+func writeWindowsLockHolder(mutexName, label string) {
+	if err := os.MkdirAll(windowsLockHolderDir(), 0o700); err != nil {
+		return
+	}
+	rec := lockHolderRecord{pid: os.Getpid(), startUnixMS: time.Now().UnixMilli(), label: label}
+	_ = os.WriteFile(windowsLockHolderPath(mutexName), []byte(formatLockHolderRecord(rec)), 0o600)
+}
+
+func removeWindowsLockHolder(mutexName string) {
+	_ = os.Remove(windowsLockHolderPath(mutexName))
+}
+
+// describeWindowsLockHolder names the run currently holding mutexName, or ""
+// when no trustworthy record exists. A record whose PID is dead is a crash
+// leftover (the OS already released the abandoned mutex); it is skipped, not
+// deleted, because removal here could race the file the next live holder just
+// wrote — the next acquire overwrites it anyway.
+func describeWindowsLockHolder(mutexName string) string {
+	data, err := os.ReadFile(windowsLockHolderPath(mutexName))
+	if err != nil {
+		return ""
+	}
+	rec, ok := parseLockHolderRecord(string(data))
+	if !ok || !windowsProcessAlive(strconv.Itoa(rec.pid)) {
+		return ""
+	}
+	return describeLockHolder(rec, time.Now())
 }
 
 // windowsMutatedRoots is the set of paths a run edits ACLs on: its writable

@@ -3,6 +3,7 @@ package winsandbox
 import (
 	"errors"
 	"os"
+	"time"
 )
 
 // ErrUnsupported is returned when the package is used on a non-Windows host or
@@ -23,6 +24,12 @@ type Spec struct {
 	Network         bool
 	Writable        bool
 	TempPrefix      string
+	// LockWait bounds how long this run may queue behind another sandboxed
+	// command holding the same per-root lock before failing with a clear
+	// error. Zero uses the short interactive default; callers whose run
+	// nobody is blocked on (background jobs) pass a longer budget.
+	// WINDOWS_SANDBOX_LOCK_MS overrides both.
+	LockWait time.Duration
 }
 
 // RunOptions carries process IO and environment overrides.
